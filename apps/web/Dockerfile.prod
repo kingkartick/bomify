@@ -5,7 +5,7 @@ COPY package*.json ./
 RUN npm install
 COPY . .
 # Limit heap so the build fits on a 1 GB instance (with swap)
-ENV NODE_OPTIONS=--max-old-space-size=768
+ENV NODE_OPTIONS=--max-old-space-size=2560
 RUN npx vite build
 
 # Stage 2: serve with nginx, proxy /api to the FastAPI container

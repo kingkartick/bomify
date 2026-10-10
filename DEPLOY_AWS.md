@@ -56,3 +56,14 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 - **IP changes on stop/start.** Attach an Elastic IP if you want a stable address (free while attached to a running instance).
 - **HTTPS:** this serves plain HTTP. For HTTPS, point a domain at the instance and put Caddy or certbot in front, or use CloudFront.
 - **Backups:** data lives in the `pgdata` Docker volume on the instance. Take EBS snapshots if the data matters.
+
+## Adding another client
+
+The app is single-tenant, so each client gets its own isolated stack (database, secrets, login) on a separate port:
+
+```bash
+cd ~/bomify
+bash deploy/add-client.sh acme 8080 "Acme Corp"
+```
+
+Then open TCP 8080 in the EC2 security group and visit `http://<server-ip>:8080`. The script prints the generated admin login once. Each client's secrets live in `.env.<slug>` (git-ignored). Budget roughly 600-800 MB RAM per client; on a t3.small expect 2 clients at most.

@@ -226,3 +226,8 @@ apps/web/dist/
 
 # Docker volumes
 pgdata/
+
+# Per-deployment env files hold secrets; never commit them
+.env.*
+!.env.example
+!.env.prod.example
