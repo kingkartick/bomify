@@ -3,6 +3,7 @@
 #
 # Usage: bash deploy/add-client.sh <slug> <web-port> ["Display Name"] [admin-password]
 # Example: bash deploy/add-client.sh acme 8080 "Acme Corp"
+# New clients start empty (no demo data). For a demo client: SEED_DEMO_DATA=true bash deploy/add-client.sh ...
 #
 # The first client (.env.prod, port 80) is left untouched. Images are built once
 # (see docker-compose.prod.yml), so this takes seconds. Remember to open <web-port>
@@ -40,6 +41,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=$ADMIN_PW
 ADMIN_EMAIL=admin@$SLUG.local
 ADMIN_FULL_NAME=System Administrator
+SEED_DEMO_DATA=${SEED_DEMO_DATA:-false}
 GROQ_API_KEY=
 EOF
 chmod 600 "$ENV_FILE"

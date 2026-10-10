@@ -260,8 +260,11 @@ async def seed_dummy_erp_data() -> None:
 async def async_main() -> None:
     await setup_copilot_reader()
     await seed_admin()
-    await seed_demo_bom()
-    await seed_dummy_erp_data()
+    if settings.SEED_DEMO_DATA:
+        await seed_demo_bom()
+        await seed_dummy_erp_data()
+    else:
+        print("SEED_DEMO_DATA=false: skipping demo BOM and dummy ERP data.")
     # Seed default ERP settings
     async with async_session() as session:
         await seed_default_settings(session)
