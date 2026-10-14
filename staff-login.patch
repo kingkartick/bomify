@@ -1,0 +1,3692 @@
+diff -ruN a/.env.example b/.env.example
+--- a/.env.example	2026-10-05 19:30:31.253716810 +0000
++++ b/.env.example	2026-10-05 19:30:31.277576104 +0000
+@@ -22,6 +22,8 @@
+ JWT_SECRET_KEY=change-me-to-a-random-jwt-secret
+ JWT_ALGORITHM=HS256
+ JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
++# Staff keep the task dashboard open all shift, so their sign-in lasts longer (minutes)
++STAFF_ACCESS_TOKEN_EXPIRE_MINUTES=720
+ 
+ # --- Frontend ---
+ VITE_API_URL=http://localhost:8000
+@@ -32,3 +34,19 @@
+ ADMIN_PASSWORD=admin123
+ ADMIN_EMAIL=admin@quadstack.local
+ ADMIN_FULL_NAME=System Administrator
++
++# --- Email notifications (owner <-> staff) ---
++# Where the app is opened in a browser — used for the links inside emails
++APP_BASE_URL=http://localhost:5173
++# With Docker Compose, emails land in a local inbox at http://localhost:8025,
++# so there is nothing to set. To send real email instead, remove the "#" from the
++# lines below and fill them in. (Leave SMTP_HOST empty to switch email off; browser
++# and in-app notifications keep working.)
++#   Gmail: smtp.gmail.com, port 587, TLS on, and an "App password" as the password
++# SMTP_HOST=smtp.gmail.com
++# SMTP_PORT=587
++# SMTP_USERNAME=you@gmail.com
++# SMTP_PASSWORD=your-app-password
++# SMTP_FROM=QuadStack <you@gmail.com>
++# SMTP_USE_TLS=true
++# SMTP_USE_SSL=false
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-05 19:30:31.254204706 +0000
++++ b/README.md	2026-10-05 19:30:31.283807553 +0000
+@@ -11,17 +11,62 @@
+ If your Docker setup uses the legacy command:
+ ```bash
+ docker-compose up --build
+-``
++```
+ Services:
+ - Frontend: http://localhost:5173
+ - API: http://localhost:8000
+ - API docs (Swagger): http://localhost:8000/docs
++- Email inbox (Mailpit, catches every email the app sends): http://localhost:8025
+ Default seeded admin credentials (development):
+ - Username: `admin`
+ - Email: `admin@quadstack.local`
+ - Password: `admin123`
+ 
+ 
++## Owner and Staff
++
++QuadStack has two kinds of accounts, each with its own login:
++
++| | Owner | Staff |
++|---|---|---|
++| Sees | Everything (the modules you give them) | One shared task dashboard, nothing else |
++| Logs in on | the **Owner** tab of the login page | the **Staff** tab of the login page |
++| Gets | A bell with updates, browser alerts and emails when an order is ready to dispatch | A bell, browser alerts and emails when a new order is assigned |
++
++The seeded `admin` account is an owner. Staff cannot open or call any owner screen or API.
++
++### Create a staff account
++Sign in as owner, open **Users & Team**, click **Add User**, and set **Account type** to **Staff**.
++Use a real email address: that is where order emails go.
++
++### The order loop
++
++1. **Owner assigns an order.** Production, then the **Work Orders** tab, then the blue send icon (**Assign to staff**). Add an optional note. If production hasn't started, it starts automatically.
++2. **Every staff member is notified** with a browser pop-up and an email, and the order appears on the staff dashboard. Everyone sees the same list.
++3. **Staff finish it.** On the dashboard they press **Done, ready for dispatch** and enter how many they finished. This completes the production process, so finished goods are added to stock and materials are deducted, exactly like the owner's **Mark as Complete** button.
++4. **The owner is notified** (bell, browser pop-up and email) with a link that opens the dispatch screen for that order. The owner dispatches it.
++
++The owner can withdraw an order that staff haven't finished (the undo icon on the Work Orders tab).
++
++### Notifications
++
++- **Bell**: owners find it in the sidebar, staff in the top bar. It shows unread notifications and updates every 10 seconds.
++- **Browser alerts**: each person turns them on once (the bell menu, or the banner on the staff dashboard) and allows notifications when the browser asks. Pop-ups appear while QuadStack is open in a browser tab, even a background tab. They work on `localhost`; any other address needs HTTPS. If the browser is fully closed, the email still arrives.
++- **Email**: with Docker Compose, emails go to a local inbox at http://localhost:8025, so you can see them without any setup. To send real email, add these to your `.env` file and restart:
++
++```
++SMTP_HOST=smtp.gmail.com
++SMTP_PORT=587
++SMTP_USERNAME=you@gmail.com
++SMTP_PASSWORD=your-app-password
++SMTP_FROM=QuadStack <you@gmail.com>
++SMTP_USE_TLS=true
++APP_BASE_URL=http://localhost:5173
++```
++
++  Gmail needs an "App password" (Google Account, Security, 2-Step Verification). Leave `SMTP_HOST` empty to switch email off; the bell and browser alerts keep working.
++- Staff sessions last 12 hours (`STAFF_ACCESS_TOKEN_EXPIRE_MINUTES`) so a dashboard left open on a shop-floor screen keeps receiving alerts.
++
+ ## Architecture Snapshot
+ 
+ - `apps/api`: FastAPI backend, SQLAlchemy, Alembic migrations, Redis-backed features, JWT auth, seed utilities.
+@@ -74,6 +119,7 @@
+ - Production
+ - Dispatch
+ - Settings and health APIs
++- Owner/staff roles, staff tasks and notifications (`test_staff_tasks.py`)
+ 
+ ### 1) Start required services
+ 
+@@ -144,6 +190,7 @@
+ - JWT settings
+ - Seeded admin credentials
+ - Copilot agent configuration (`GOOGLE_API_KEY`, model and timeout settings)
++- Email settings (`SMTP_*`, `APP_BASE_URL`) and staff session length
+ 
+ Note: `apps/api/app/core/config.py` reads from `.env` using Pydantic settings.
+ 
+diff -ruN a/apps/api/alembic/env.py b/apps/api/alembic/env.py
+--- a/apps/api/alembic/env.py	2026-10-05 19:30:31.254527311 +0000
++++ b/apps/api/alembic/env.py	2026-10-05 19:30:31.277738899 +0000
+@@ -22,6 +22,8 @@
+ from app.modules.dispatch.models import Dispatch # noqa: F401
+ from app.modules.copilot.models import CopilotThread, CopilotChart # noqa: F401
+ from app.modules.settings.models import Setting # noqa: F401
++from app.modules.notifications.models import Notification # noqa: F401
++from app.modules.tasks.models import StaffTask # noqa: F401
+ 
+ config = context.config
+ 
+diff -ruN a/apps/api/alembic/versions/0003_staff_roles_tasks.py b/apps/api/alembic/versions/0003_staff_roles_tasks.py
+--- a/apps/api/alembic/versions/0003_staff_roles_tasks.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/alembic/versions/0003_staff_roles_tasks.py	2026-10-05 19:30:31.277854020 +0000
+@@ -0,0 +1,88 @@
++"""staff roles, staff tasks and notifications
++
++Revision ID: 0003_staff_roles_tasks
++Revises: da126c3defa0
++Create Date: 2026-10-04 12:00:00.000000
++
++Adds:
++  * users.role              — "owner" (everything) or "staff" (task dashboard only).
++                              Existing users become owners, so nothing changes for them.
++  * staff_tasks             — production orders the owner has sent to staff.
++  * notifications           — in-app / browser notifications for owner and staff.
++"""
++from typing import Sequence, Union
++
++from alembic import op
++import sqlalchemy as sa
++
++
++# revision identifiers, used by Alembic.
++revision: str = '0003_staff_roles_tasks'
++down_revision: Union[str, None] = 'da126c3defa0'
++branch_labels: Union[str, Sequence[str], None] = None
++depends_on: Union[str, Sequence[str], None] = None
++
++
++def upgrade() -> None:
++    # ── users.role ────────────────────────────────────────────────────────────
++    op.add_column(
++        'users',
++        sa.Column('role', sa.String(length=20), nullable=False, server_default='owner'),
++    )
++    op.create_index('ix_users_role', 'users', ['role'])
++
++    # ── staff_tasks ───────────────────────────────────────────────────────────
++    op.create_table(
++        'staff_tasks',
++        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
++        sa.Column('process_id', sa.Integer(), nullable=False),
++        sa.Column('work_order_id', sa.Integer(), nullable=True),
++        sa.Column('status', sa.String(length=30), nullable=False, server_default='assigned'),
++        sa.Column('note', sa.Text(), nullable=True),
++        sa.Column('assigned_by_id', sa.Integer(), nullable=True),
++        sa.Column('assigned_by_name', sa.String(length=100), nullable=True),
++        sa.Column('assigned_at', sa.DateTime(timezone=True), nullable=True),
++        sa.Column('completed_by_id', sa.Integer(), nullable=True),
++        sa.Column('completed_by_name', sa.String(length=100), nullable=True),
++        sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
++        sa.Column('completed_quantity', sa.Numeric(10, 2), nullable=True),
++        sa.Column('completion_note', sa.Text(), nullable=True),
++        sa.Column('created_at', sa.DateTime(timezone=True), nullable=True),
++        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
++        sa.ForeignKeyConstraint(['process_id'], ['production_processes.id'], ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['work_order_id'], ['work_orders.id'], ondelete='SET NULL'),
++        sa.ForeignKeyConstraint(['assigned_by_id'], ['users.id'], ondelete='SET NULL'),
++        sa.ForeignKeyConstraint(['completed_by_id'], ['users.id'], ondelete='SET NULL'),
++    )
++    op.create_index('ix_staff_tasks_process_id', 'staff_tasks', ['process_id'], unique=True)
++    op.create_index('ix_staff_tasks_work_order_id', 'staff_tasks', ['work_order_id'])
++    op.create_index('ix_staff_tasks_status', 'staff_tasks', ['status'])
++
++    # ── notifications ─────────────────────────────────────────────────────────
++    op.create_table(
++        'notifications',
++        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
++        sa.Column('user_id', sa.Integer(), nullable=False),
++        sa.Column('type', sa.String(length=50), nullable=False),
++        sa.Column('title', sa.String(length=200), nullable=False),
++        sa.Column('message', sa.Text(), nullable=False),
++        sa.Column('link', sa.String(length=300), nullable=True),
++        sa.Column('is_read', sa.Boolean(), nullable=False, server_default=sa.false()),
++        sa.Column('created_at', sa.DateTime(timezone=True), nullable=True),
++        sa.Column('read_at', sa.DateTime(timezone=True), nullable=True),
++        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
++    )
++    op.create_index('ix_notifications_user_id', 'notifications', ['user_id'])
++
++
++def downgrade() -> None:
++    op.drop_index('ix_notifications_user_id', table_name='notifications')
++    op.drop_table('notifications')
++
++    op.drop_index('ix_staff_tasks_status', table_name='staff_tasks')
++    op.drop_index('ix_staff_tasks_work_order_id', table_name='staff_tasks')
++    op.drop_index('ix_staff_tasks_process_id', table_name='staff_tasks')
++    op.drop_table('staff_tasks')
++
++    op.drop_index('ix_users_role', table_name='users')
++    op.drop_column('users', 'role')
+diff -ruN a/apps/api/app/core/config.py b/apps/api/app/core/config.py
+--- a/apps/api/app/core/config.py	2026-10-05 19:30:31.255260048 +0000
++++ b/apps/api/app/core/config.py	2026-10-05 19:30:31.277942374 +0000
+@@ -48,6 +48,25 @@
+     JWT_SECRET_KEY: str = "change-me-jwt"
+     JWT_ALGORITHM: str = "HS256"
+     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
++    # Staff leave the task dashboard open on a shop-floor screen all shift, so their
++    # sign-in lasts longer (default 12 hours) — otherwise alerts stop after an hour.
++    STAFF_ACCESS_TOKEN_EXPIRE_MINUTES: int = 720
++
++    # Public URL of the web app — used for links inside notification emails
++    APP_BASE_URL: str = "http://localhost:5173"
++
++    # -------------------------------------------------------
++    # Email notifications (SMTP)
++    # Leave SMTP_HOST empty to switch email off (in-app and browser
++    # notifications keep working).
++    # -------------------------------------------------------
++    SMTP_HOST: str = ""
++    SMTP_PORT: int = 587
++    SMTP_USERNAME: str = ""
++    SMTP_PASSWORD: str = ""
++    SMTP_FROM: str = "QuadStack <no-reply@quadstack.local>"
++    SMTP_USE_TLS: bool = True   # STARTTLS (typical for port 587)
++    SMTP_USE_SSL: bool = False  # implicit TLS (typical for port 465)
+ 
+     # Seed admin (used by app/seed.py on first startup)
+     ADMIN_USERNAME: str = "admin"
+diff -ruN a/apps/api/app/core/exceptions.py b/apps/api/app/core/exceptions.py
+--- a/apps/api/app/core/exceptions.py	2026-10-05 19:30:31.255729501 +0000
++++ b/apps/api/app/core/exceptions.py	2026-10-05 19:30:31.277966782 +0000
+@@ -2,7 +2,13 @@
+ Custom exception classes and FastAPI exception handlers.
+ """
+ 
+-from fastapi import HTTPException, status
++import logging
++
++from fastapi import HTTPException, Request, status
++from fastapi.responses import JSONResponse
++from sqlalchemy.exc import ProgrammingError
++
++logger = logging.getLogger(__name__)
+ 
+ 
+ class NotFoundError(HTTPException):
+@@ -23,3 +29,30 @@
+ class ConflictError(HTTPException):
+     def __init__(self, detail: str = "Resource already exists"):
+         super().__init__(status_code=status.HTTP_409_CONFLICT, detail=detail)
++
++
++STALE_DATABASE_MESSAGE = (
++    "The database hasn't been updated for this version of QuadStack yet. "
++    "Restart the API so it can apply the update (run: docker compose restart api), "
++    "then try again."
++)
++
++
++async def database_error_handler(request: Request, exc: ProgrammingError) -> JSONResponse:
++    """Explain the common "database is behind the code" crash instead of a bare 500.
++
++    The API reloads code changes instantly, but database updates (migrations) only run
++    when the API starts. If new code that needs a new column or table is running before
++    that update, every query on it fails with "... does not exist".
++    """
++    logger.error("Database error on %s %s: %s", request.method, request.url.path, exc)
++    text = str(exc)
++    if "does not exist" in text and ("column" in text or "relation" in text):
++        return JSONResponse(
++            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
++            content={"detail": STALE_DATABASE_MESSAGE},
++        )
++    return JSONResponse(
++        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++        content={"detail": "Internal server error"},
++    )
+diff -ruN a/apps/api/app/main.py b/apps/api/app/main.py
+--- a/apps/api/app/main.py	2026-10-05 19:30:31.255829202 +0000
++++ b/apps/api/app/main.py	2026-10-05 19:30:31.277990136 +0000
+@@ -2,10 +2,12 @@
+ QuadStack API — FastAPI Application Entry Point
+ """
+ 
+-from fastapi import FastAPI
++from fastapi import Depends, FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
++from sqlalchemy.exc import ProgrammingError
+ 
+ from app.core.config import settings
++from app.core.exceptions import database_error_handler
+ from app.modules.users.router import router as users_router
+ from app.modules.parties.router import router as parties_router
+ from app.modules.inventory.router import router as inventory_router
+@@ -16,6 +18,9 @@
+ from app.modules.copilot.router import router as copilot_router
+ from app.modules.copilot.chart_router import chart_router
+ from app.modules.settings.router import router as settings_router
++from app.modules.notifications.router import router as notifications_router
++from app.modules.tasks.router import router as tasks_router, staff_router
++from app.modules.users.dependencies import require_owner
+ 
+ app = FastAPI(
+     title=f"{settings.CLIENT_NAME} — Operations Management API",
+@@ -33,17 +38,31 @@
+     allow_headers=["*"],
+ )
+ 
++app.add_exception_handler(ProgrammingError, database_error_handler)
++
+ # Mount routers
++#
++# Login, profile and user management live in users_router (they have their own checks).
+ app.include_router(users_router, prefix="/api")
+-app.include_router(parties_router, prefix="/api")
+-app.include_router(inventory_router, prefix="/api")
+-app.include_router(sales_router, prefix="/api")
+-app.include_router(purchases_router, prefix="/api")
+-app.include_router(production_router, prefix="/api")
+-app.include_router(dispatch_router, prefix="/api")
+-app.include_router(copilot_router, prefix="/api")
++
++# Everything below is the owner's side of the software. Staff accounts are turned
++# away here, no matter what a particular endpoint checks for itself.
++_owner_only = [Depends(require_owner)]
++app.include_router(parties_router, prefix="/api", dependencies=_owner_only)
++app.include_router(inventory_router, prefix="/api", dependencies=_owner_only)
++app.include_router(sales_router, prefix="/api", dependencies=_owner_only)
++app.include_router(purchases_router, prefix="/api", dependencies=_owner_only)
++app.include_router(production_router, prefix="/api", dependencies=_owner_only)
++app.include_router(dispatch_router, prefix="/api", dependencies=_owner_only)
++app.include_router(copilot_router, prefix="/api", dependencies=_owner_only)
+ app.include_router(chart_router, prefix="/api")
+-app.include_router(settings_router, prefix="/api")
++app.include_router(settings_router, prefix="/api", dependencies=_owner_only)
++
++# Shared by owner and staff: notifications, plus the task endpoints
++# (tasks_router is owner-only per endpoint; staff_router is for the shop floor).
++app.include_router(notifications_router, prefix="/api")
++app.include_router(tasks_router, prefix="/api")
++app.include_router(staff_router, prefix="/api")
+ 
+ @app.get("/api/health", tags=["Health"])
+ async def health_check():
+diff -ruN a/apps/api/app/modules/notifications/__init__.py b/apps/api/app/modules/notifications/__init__.py
+--- a/apps/api/app/modules/notifications/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/notifications/__init__.py	2026-10-05 19:30:31.279138948 +0000
+@@ -0,0 +1 @@
++"""Notifications: in-app records, browser pop-ups (via the web app) and email."""
+diff -ruN a/apps/api/app/modules/notifications/email.py b/apps/api/app/modules/notifications/email.py
+--- a/apps/api/app/modules/notifications/email.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/notifications/email.py	2026-10-05 19:30:31.279182015 +0000
+@@ -0,0 +1,95 @@
++"""
++Email delivery for notifications (plain SMTP, no extra dependencies).
++
++Emails are sent from a background task so the API response is never held up by
++a slow mail server, and a failure to send never breaks the request that
++triggered it. If SMTP_HOST is empty, email is skipped and a line is logged.
++"""
++
++import asyncio
++import logging
++import smtplib
++import ssl
++from dataclasses import dataclass
++from email.message import EmailMessage as MimeMessage
++from html import escape
++
++from app.core.config import settings
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass
++class EmailMessage:
++    to: str
++    subject: str
++    text: str
++    html: str | None = None
++
++
++def email_enabled() -> bool:
++    return bool(settings.SMTP_HOST)
++
++
++def build_notification_email(
++    to: str, full_name: str, title: str, message: str, link: str | None
++) -> EmailMessage:
++    """Build a simple text + HTML email for a notification."""
++    url = f"{settings.APP_BASE_URL.rstrip('/')}{link}" if link else settings.APP_BASE_URL
++
++    text = f"Hi {full_name},\n\n{message}\n\nOpen QuadStack: {url}\n"
++
++    safe_message = escape(message).replace("\n", "<br>")
++    html = (
++        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#1f2937;">'
++        f"<p>Hi {escape(full_name)},</p>"
++        f"<p>{safe_message}</p>"
++        f'<p><a href="{escape(url, quote=True)}" '
++        'style="display:inline-block;padding:10px 18px;background:#1677ff;'
++        'color:#ffffff;text-decoration:none;border-radius:6px;">Open QuadStack</a></p>'
++        "</div>"
++    )
++    return EmailMessage(to=to, subject=title, text=text, html=html)
++
++
++def _send_sync(messages: list[EmailMessage]) -> None:
++    """Send all messages over a single SMTP connection (blocking)."""
++    context = ssl.create_default_context()
++    if settings.SMTP_USE_SSL:
++        server: smtplib.SMTP = smtplib.SMTP_SSL(
++            settings.SMTP_HOST, settings.SMTP_PORT, timeout=15, context=context
++        )
++    else:
++        server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15)
++
++    with server:
++        if not settings.SMTP_USE_SSL and settings.SMTP_USE_TLS:
++            server.starttls(context=context)
++        if settings.SMTP_USERNAME:
++            server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
++
++        for m in messages:
++            mime = MimeMessage()
++            mime["Subject"] = m.subject
++            mime["From"] = settings.SMTP_FROM
++            mime["To"] = m.to
++            mime.set_content(m.text)
++            if m.html:
++                mime.add_alternative(m.html, subtype="html")
++            server.send_message(mime)
++
++
++async def send_emails(messages: list[EmailMessage]) -> None:
++    """Send emails without ever raising. Safe to use as a FastAPI background task."""
++    if not messages:
++        return
++    if not email_enabled():
++        logger.info(
++            "SMTP_HOST is not set — skipped %d notification email(s).", len(messages)
++        )
++        return
++    try:
++        await asyncio.to_thread(_send_sync, messages)
++        logger.info("Sent %d notification email(s).", len(messages))
++    except Exception:  # noqa: BLE001 — a mail problem must never break the app
++        logger.exception("Could not send notification email(s).")
+diff -ruN a/apps/api/app/modules/notifications/models.py b/apps/api/app/modules/notifications/models.py
+--- a/apps/api/app/modules/notifications/models.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/notifications/models.py	2026-10-05 19:30:31.279157279 +0000
+@@ -0,0 +1,31 @@
++"""
++Notification model — one row per person per event, shown in the bell menu
++and used to pop browser notifications.
++"""
++
++from datetime import datetime, timezone
++
++from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
++from sqlalchemy.orm import Mapped, mapped_column
++
++from app.core.database import Base
++
++
++class Notification(Base):
++    __tablename__ = "notifications"
++
++    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
++    user_id: Mapped[int] = mapped_column(
++        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
++    )
++    # e.g. "task_assigned", "task_ready_for_dispatch", "task_cancelled"
++    type: Mapped[str] = mapped_column(String(50), nullable=False)
++    title: Mapped[str] = mapped_column(String(200), nullable=False)
++    message: Mapped[str] = mapped_column(Text, nullable=False)
++    # Front-end route to open when the notification is clicked, e.g. "/staff"
++    link: Mapped[str | None] = mapped_column(String(300))
++    is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
++    created_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
++    )
++    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+diff -ruN a/apps/api/app/modules/notifications/router.py b/apps/api/app/modules/notifications/router.py
+--- a/apps/api/app/modules/notifications/router.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/notifications/router.py	2026-10-05 19:30:31.279205745 +0000
+@@ -0,0 +1,56 @@
++"""
++API endpoints for notifications. Open to any signed-in user (owner or staff) —
++each person only ever sees their own.
++"""
++
++from fastapi import APIRouter, Depends, Query
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.core.database import get_db
++from app.modules.notifications import services
++from app.modules.notifications.schemas import (
++    NotificationListResponse,
++    NotificationResponse,
++    UnreadCountResponse,
++)
++from app.modules.users.dependencies import get_current_user
++from app.modules.users.models import User
++
++router = APIRouter(prefix="/notifications", tags=["Notifications"])
++
++
++@router.get("/", response_model=NotificationListResponse)
++async def list_notifications(
++    limit: int = Query(30, ge=1, le=100),
++    db: AsyncSession = Depends(get_db),
++    current_user: User = Depends(get_current_user),
++):
++    """Latest notifications for the signed-in user, newest first."""
++    items, unread = await services.list_for_user(db, current_user.id, limit)
++    return NotificationListResponse(
++        notifications=[NotificationResponse.model_validate(n) for n in items],
++        unread_count=unread,
++    )
++
++
++@router.post("/read-all", response_model=UnreadCountResponse)
++async def read_all(
++    db: AsyncSession = Depends(get_db),
++    current_user: User = Depends(get_current_user),
++):
++    """Mark every notification as read."""
++    return UnreadCountResponse(
++        unread_count=await services.mark_all_read(db, current_user.id)
++    )
++
++
++@router.post("/{notification_id}/read", response_model=UnreadCountResponse)
++async def read_one(
++    notification_id: int,
++    db: AsyncSession = Depends(get_db),
++    current_user: User = Depends(get_current_user),
++):
++    """Mark a single notification as read."""
++    return UnreadCountResponse(
++        unread_count=await services.mark_read(db, current_user.id, notification_id)
++    )
+diff -ruN a/apps/api/app/modules/notifications/schemas.py b/apps/api/app/modules/notifications/schemas.py
+--- a/apps/api/app/modules/notifications/schemas.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/notifications/schemas.py	2026-10-05 19:30:31.279170307 +0000
+@@ -0,0 +1,29 @@
++"""
++Pydantic schemas for the Notifications module.
++"""
++
++from collections.abc import Sequence
++from datetime import datetime
++
++from pydantic import BaseModel
++
++
++class NotificationResponse(BaseModel):
++    id: int
++    type: str
++    title: str
++    message: str
++    link: str | None = None
++    is_read: bool
++    created_at: datetime
++
++    model_config = {"from_attributes": True}
++
++
++class NotificationListResponse(BaseModel):
++    notifications: Sequence[NotificationResponse]
++    unread_count: int
++
++
++class UnreadCountResponse(BaseModel):
++    unread_count: int
+diff -ruN a/apps/api/app/modules/notifications/services.py b/apps/api/app/modules/notifications/services.py
+--- a/apps/api/app/modules/notifications/services.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/notifications/services.py	2026-10-05 19:30:31.279194350 +0000
+@@ -0,0 +1,105 @@
++"""
++Business logic for notifications: create them for a group of people, list them,
++and mark them read.
++"""
++
++from collections.abc import Sequence
++from datetime import datetime, timezone
++
++from sqlalchemy import func, select, update
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.core.exceptions import NotFoundError
++from app.modules.notifications.email import EmailMessage, build_notification_email
++from app.modules.notifications.models import Notification
++from app.modules.users.models import User, UserRole
++
++
++async def active_users_with_role(
++    db: AsyncSession, role: UserRole, exclude_user_id: int | None = None
++) -> list[User]:
++    """All active accounts with the given role (optionally leaving one person out)."""
++    q = select(User).where(User.role == role, User.is_active.is_(True)).order_by(User.id)
++    if exclude_user_id is not None:
++        q = q.where(User.id != exclude_user_id)
++    result = await db.execute(q)
++    return list(result.scalars().all())
++
++
++async def notify_users(
++    db: AsyncSession,
++    users: Sequence[User],
++    *,
++    kind: str,
++    title: str,
++    message: str,
++    link: str | None = None,
++    send_email: bool = True,
++) -> list[EmailMessage]:
++    """Create one in-app notification per user.
++
++    Returns the emails that should be sent. The caller hands them to a
++    background task *after* the request, so sending never blocks the response.
++    """
++    emails: list[EmailMessage] = []
++    for user in users:
++        db.add(
++            Notification(
++                user_id=user.id, type=kind, title=title, message=message, link=link
++            )
++        )
++        if send_email and user.email:
++            emails.append(
++                build_notification_email(
++                    user.email, user.full_name, title, message, link
++                )
++            )
++    await db.flush()
++    return emails
++
++
++async def unread_count(db: AsyncSession, user_id: int) -> int:
++    result = await db.execute(
++        select(func.count(Notification.id)).where(
++            Notification.user_id == user_id, Notification.is_read.is_(False)
++        )
++    )
++    return result.scalar_one()
++
++
++async def list_for_user(
++    db: AsyncSession, user_id: int, limit: int = 30
++) -> tuple[list[Notification], int]:
++    result = await db.execute(
++        select(Notification)
++        .where(Notification.user_id == user_id)
++        .order_by(Notification.id.desc())
++        .limit(limit)
++    )
++    return list(result.scalars().all()), await unread_count(db, user_id)
++
++
++async def mark_read(db: AsyncSession, user_id: int, notification_id: int) -> int:
++    result = await db.execute(
++        select(Notification).where(
++            Notification.id == notification_id, Notification.user_id == user_id
++        )
++    )
++    notification = result.scalar_one_or_none()
++    if not notification:
++        raise NotFoundError("Notification not found")
++    if not notification.is_read:
++        notification.is_read = True
++        notification.read_at = datetime.now(timezone.utc)
++        await db.flush()
++    return await unread_count(db, user_id)
++
++
++async def mark_all_read(db: AsyncSession, user_id: int) -> int:
++    await db.execute(
++        update(Notification)
++        .where(Notification.user_id == user_id, Notification.is_read.is_(False))
++        .values(is_read=True, read_at=datetime.now(timezone.utc))
++    )
++    await db.flush()
++    return 0
+diff -ruN a/apps/api/app/modules/tasks/__init__.py b/apps/api/app/modules/tasks/__init__.py
+--- a/apps/api/app/modules/tasks/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/tasks/__init__.py	2026-10-05 19:30:31.279234378 +0000
+@@ -0,0 +1 @@
++"""Staff tasks: orders the owner sends to staff, and the hand-back when staff finish."""
+diff -ruN a/apps/api/app/modules/tasks/models.py b/apps/api/app/modules/tasks/models.py
+--- a/apps/api/app/modules/tasks/models.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/tasks/models.py	2026-10-05 19:30:31.279265250 +0000
+@@ -0,0 +1,78 @@
++"""
++Staff task model.
++
++A staff task is a production order the owner has sent to the shop floor. Every
++staff member sees the same list — tasks are not tied to one person.
++
++Lifecycle:  assigned  ->  ready_for_dispatch   (or  cancelled by the owner)
++"""
++
++import enum
++from datetime import datetime, timezone
++
++from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, String, Text
++from sqlalchemy.orm import Mapped, mapped_column
++
++from app.core.database import Base
++
++
++class TaskStatus(str, enum.Enum):
++    ASSIGNED = "assigned"
++    READY_FOR_DISPATCH = "ready_for_dispatch"
++    CANCELLED = "cancelled"
++
++
++class StaffTask(Base):
++    __tablename__ = "staff_tasks"
++
++    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
++    # The production process staff will carry out (one task per process).
++    process_id: Mapped[int] = mapped_column(
++        ForeignKey("production_processes.id", ondelete="CASCADE"),
++        unique=True,
++        index=True,
++        nullable=False,
++    )
++    work_order_id: Mapped[int | None] = mapped_column(
++        ForeignKey("work_orders.id", ondelete="SET NULL"), index=True
++    )
++    status: Mapped[TaskStatus] = mapped_column(
++        Enum(
++            TaskStatus,
++            native_enum=False,
++            length=30,
++            values_callable=lambda x: [e.value for e in x],
++        ),
++        default=TaskStatus.ASSIGNED,
++        server_default=TaskStatus.ASSIGNED.value,
++        index=True,
++        nullable=False,
++    )
++
++    # Instructions from the owner
++    note: Mapped[str | None] = mapped_column(Text)
++    assigned_by_id: Mapped[int | None] = mapped_column(
++        ForeignKey("users.id", ondelete="SET NULL")
++    )
++    assigned_by_name: Mapped[str | None] = mapped_column(String(100))
++    assigned_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
++    )
++
++    # Filled in when staff mark the order done
++    completed_by_id: Mapped[int | None] = mapped_column(
++        ForeignKey("users.id", ondelete="SET NULL")
++    )
++    completed_by_name: Mapped[str | None] = mapped_column(String(100))
++    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
++    completed_quantity: Mapped[float | None] = mapped_column(Numeric(10, 2))
++    completion_note: Mapped[str | None] = mapped_column(Text)
++
++    created_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
++    )
++    updated_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True),
++        default=lambda: datetime.now(timezone.utc),
++        onupdate=lambda: datetime.now(timezone.utc),
++    )
+diff -ruN a/apps/api/app/modules/tasks/router.py b/apps/api/app/modules/tasks/router.py
+--- a/apps/api/app/modules/tasks/router.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/tasks/router.py	2026-10-05 19:30:31.279291274 +0000
+@@ -0,0 +1,94 @@
++"""
++API endpoints for staff tasks.
++
++Owner:  POST /tasks/assign, GET /tasks/, POST /tasks/{id}/cancel
++Staff:  GET /staff/tasks, POST /staff/tasks/{id}/complete
++"""
++
++from fastapi import APIRouter, BackgroundTasks, Depends, Query
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.core.database import get_db
++from app.modules.notifications.email import send_emails
++from app.modules.tasks import services
++from app.modules.tasks.schemas import (
++    AssignTaskRequest,
++    AssignTaskResponse,
++    CompleteTaskRequest,
++    StaffDashboardResponse,
++    TaskListResponse,
++    TaskResponse,
++)
++from app.modules.users.dependencies import get_current_user, require_owner
++from app.modules.users.models import User
++
++# ── Owner side ───────────────────────────────────────────────────────────────
++
++router = APIRouter(prefix="/tasks", tags=["Staff Tasks (Owner)"])
++
++
++@router.post("/assign", response_model=AssignTaskResponse, status_code=201)
++async def assign_task(
++    body: AssignTaskRequest,
++    background_tasks: BackgroundTasks,
++    db: AsyncSession = Depends(get_db),
++    owner: User = Depends(require_owner),
++):
++    """Send an order to staff. Every staff member gets a notification and an email."""
++    task, notified, emails = await services.assign_task(db, data=body, owner=owner)
++    background_tasks.add_task(send_emails, emails)
++    return AssignTaskResponse(task=task, notified_staff=notified)
++
++
++@router.get("/", response_model=TaskListResponse)
++async def list_tasks(
++    include_cancelled: bool = Query(False),
++    db: AsyncSession = Depends(get_db),
++    _owner: User = Depends(require_owner),
++):
++    """All orders sent to staff, newest first."""
++    tasks = await services.list_tasks_for_owner(db, include_cancelled=include_cancelled)
++    return TaskListResponse(tasks=tasks, total=len(tasks))
++
++
++@router.post("/{task_id}/cancel", response_model=TaskResponse)
++async def cancel_task(
++    task_id: int,
++    background_tasks: BackgroundTasks,
++    db: AsyncSession = Depends(get_db),
++    owner: User = Depends(require_owner),
++):
++    """Withdraw an order staff haven't finished yet."""
++    task, emails = await services.cancel_task(db, task_id=task_id, owner=owner)
++    background_tasks.add_task(send_emails, emails)
++    return task
++
++
++# ── Staff side (staff accounts — owners may use it too) ──────────────────────
++
++staff_router = APIRouter(prefix="/staff", tags=["Staff Dashboard"])
++
++
++@staff_router.get("/tasks", response_model=StaffDashboardResponse)
++async def staff_tasks(
++    db: AsyncSession = Depends(get_db),
++    _user: User = Depends(get_current_user),
++):
++    """The shared task list: what is still to do, and what was recently finished."""
++    return StaffDashboardResponse(**await services.staff_dashboard(db))
++
++
++@staff_router.post("/tasks/{task_id}/complete", response_model=TaskResponse)
++async def complete_task(
++    task_id: int,
++    background_tasks: BackgroundTasks,
++    body: CompleteTaskRequest = CompleteTaskRequest(),
++    db: AsyncSession = Depends(get_db),
++    user: User = Depends(get_current_user),
++):
++    """Mark an order done and ready for dispatch. The owner is notified."""
++    task, emails = await services.complete_task(
++        db, task_id=task_id, data=body, user=user
++    )
++    background_tasks.add_task(send_emails, emails)
++    return task
+diff -ruN a/apps/api/app/modules/tasks/schemas.py b/apps/api/app/modules/tasks/schemas.py
+--- a/apps/api/app/modules/tasks/schemas.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/tasks/schemas.py	2026-10-05 19:30:31.279278094 +0000
+@@ -0,0 +1,76 @@
++"""
++Pydantic schemas for staff tasks.
++"""
++
++from collections.abc import Sequence
++from datetime import datetime
++
++from pydantic import BaseModel, Field, model_validator
++
++from app.modules.tasks.models import TaskStatus
++
++
++class AssignTaskRequest(BaseModel):
++    """Send a production order to staff. Give the work order OR the process."""
++
++    work_order_id: int | None = None
++    process_id: int | None = None
++    note: str | None = Field(None, max_length=1000)
++
++    @model_validator(mode="after")
++    def exactly_one_target(self):
++        if (self.work_order_id is None) == (self.process_id is None):
++            raise ValueError("Provide either work_order_id or process_id")
++        return self
++
++
++class CompleteTaskRequest(BaseModel):
++    """Staff mark the order done. Quantity defaults to the full target."""
++
++    completed_quantity: float | None = Field(None, gt=0)
++    note: str | None = Field(None, max_length=1000)
++
++
++class TaskMaterial(BaseModel):
++    item_name: str | None = None
++    item_sku: str | None = None
++    unit_of_measure: str | None = None
++    quantity: float
++
++
++class TaskResponse(BaseModel):
++    id: int
++    status: TaskStatus
++    process_id: int
++    process_number: str
++    work_order_id: int | None = None
++    order_number: str | None = None
++    item_name: str | None = None
++    item_sku: str | None = None
++    uom: str | None = None
++    target_quantity: float
++    completed_quantity: float | None = None
++    delivery_date: datetime | None = None
++    note: str | None = None
++    assigned_by_name: str | None = None
++    assigned_at: datetime
++    completed_by_name: str | None = None
++    completed_at: datetime | None = None
++    completion_note: str | None = None
++    materials: list[TaskMaterial] = []
++
++
++class TaskListResponse(BaseModel):
++    tasks: Sequence[TaskResponse]
++    total: int
++
++
++class StaffDashboardResponse(BaseModel):
++    todo: Sequence[TaskResponse]
++    done: Sequence[TaskResponse]
++
++
++class AssignTaskResponse(BaseModel):
++    task: TaskResponse
++    # How many staff accounts were notified (0 means there are no active staff yet)
++    notified_staff: int
+diff -ruN a/apps/api/app/modules/tasks/services.py b/apps/api/app/modules/tasks/services.py
+--- a/apps/api/app/modules/tasks/services.py	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/api/app/modules/tasks/services.py	2026-10-05 19:30:31.279249410 +0000
+@@ -0,0 +1,386 @@
++"""
++Business logic for staff tasks.
++
++The loop this module drives:
++
++    owner assigns an order  ->  every staff member is notified (browser + email)
++    staff finish it and tick "done"  ->  the production process is completed,
++    the order becomes ready for dispatch  ->  every owner is notified
++    (browser + email) with a link straight to the dispatch screen.
++"""
++
++from datetime import datetime, timezone
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.core.exceptions import ConflictError, NotFoundError
++from app.modules.inventory.models import Item
++from app.modules.notifications import services as notification_service
++from app.modules.notifications.email import EmailMessage
++from app.modules.production.models import (
++    BOMItem,
++    ProcessStage,
++    ProductionProcess,
++    WorkOrder,
++    WorkOrderStage,
++)
++from app.modules.production.services import (
++    ProductionProcessService,
++    WorkOrderService,
++)
++from app.modules.tasks.models import StaffTask, TaskStatus
++from app.modules.tasks.schemas import AssignTaskRequest, CompleteTaskRequest
++from app.modules.users.models import User, UserRole
++
++# How many finished tasks staff see under "Recently done"
++_RECENT_DONE_LIMIT = 20
++
++
++# ─── Helpers ─────────────────────────────────────────────────────────────────
++
++
++def _fmt_qty(value: float) -> str:
++    """50.0 -> '50', 48.5 -> '48.5' (never scientific notation)."""
++    return format(float(value), "f").rstrip("0").rstrip(".") or "0"
++
++
++def _effective_status(task: StaffTask, process: ProductionProcess) -> TaskStatus:
++    """The status staff should see.
++
++    If the owner finished or cancelled the production process directly from the
++    Production page, the task follows it so it never gets stuck on the list.
++    """
++    if task.status == TaskStatus.ASSIGNED:
++        if process.stage == ProcessStage.COMPLETED:
++            return TaskStatus.READY_FOR_DISPATCH
++        if process.stage == ProcessStage.CANCELLED:
++            return TaskStatus.CANCELLED
++    return task.status
++
++
++def _dispatch_link(process_id: int, linked_sales_order_id: int | None) -> str:
++    """Same destination the Production page's "Start Dispatch" button uses."""
++    if linked_sales_order_id:
++        return f"/app/dispatch/create?so_id={linked_sales_order_id}"
++    return f"/app/dispatch/create?process_id={process_id}"
++
++
++async def _serialize(
++    db: AsyncSession, task: StaffTask, *, include_materials: bool = True
++) -> dict:
++    """Task + the order details staff need (item, quantity, due date, materials)."""
++    process = await db.get(ProductionProcess, task.process_id)
++    fg = await db.get(Item, process.fg_item_id)
++    work_order = await db.get(WorkOrder, task.work_order_id) if task.work_order_id else None
++    status = _effective_status(task, process)
++
++    materials: list[dict] = []
++    if include_materials and process.bom_id and status == TaskStatus.ASSIGNED:
++        rows = await db.execute(
++            select(BOMItem).where(BOMItem.bom_id == process.bom_id).order_by(BOMItem.id)
++        )
++        for bom_item in rows.scalars().all():
++            material = await db.get(Item, bom_item.item_id)
++            materials.append(
++                {
++                    "item_name": material.name if material else None,
++                    "item_sku": material.sku if material else None,
++                    "unit_of_measure": material.unit_of_measure if material else None,
++                    "quantity": round(
++                        float(bom_item.quantity) * float(process.target_quantity), 2
++                    ),
++                }
++            )
++
++    completed_quantity = None
++    if status == TaskStatus.READY_FOR_DISPATCH:
++        completed_quantity = float(
++            task.completed_quantity
++            if task.completed_quantity is not None
++            else process.completed_quantity
++        )
++
++    return {
++        "id": task.id,
++        "status": status,
++        "process_id": process.id,
++        "process_number": process.process_number,
++        "work_order_id": task.work_order_id,
++        "order_number": work_order.document_number if work_order else None,
++        "item_name": fg.name if fg else None,
++        "item_sku": fg.sku if fg else None,
++        "uom": fg.unit_of_measure if fg else None,
++        "target_quantity": float(process.target_quantity),
++        "completed_quantity": completed_quantity,
++        "delivery_date": process.order_delivery_date
++        or (work_order.delivery_date if work_order else None),
++        "note": task.note,
++        "assigned_by_name": task.assigned_by_name,
++        "assigned_at": task.assigned_at,
++        "completed_by_name": task.completed_by_name,
++        "completed_at": task.completed_at,
++        "completion_note": task.completion_note,
++        "materials": materials,
++    }
++
++
++# ─── Owner: assign / list / withdraw ─────────────────────────────────────────
++
++
++async def assign_task(
++    db: AsyncSession, *, data: AssignTaskRequest, owner: User
++) -> tuple[dict, int, list[EmailMessage]]:
++    """Send an order to staff.
++
++    Returns (task, how many staff were notified, emails to send in the background).
++    """
++    work_order: WorkOrder | None = None
++
++    if data.work_order_id is not None:
++        work_order = await db.get(WorkOrder, data.work_order_id)
++        if not work_order:
++            raise NotFoundError("Work order not found")
++        if work_order.process_stage == WorkOrderStage.COMPLETED:
++            raise ConflictError("This work order is already completed")
++        if work_order.process_stage == WorkOrderStage.CANCELLED:
++            raise ConflictError("This work order was cancelled")
++
++        if work_order.process_stage == WorkOrderStage.OPEN:
++            # Production hasn't started — start it so staff have a process to work on.
++            started = await WorkOrderService.start_process(
++                db, work_order.id, owner.full_name
++            )
++            process = await db.get(ProductionProcess, started["id"])
++        else:
++            result = await db.execute(
++                select(ProductionProcess)
++                .where(ProductionProcess.work_order_id == work_order.id)
++                .order_by(ProductionProcess.id.desc())
++                .limit(1)
++            )
++            process = result.scalar_one_or_none()
++            if not process:
++                raise ConflictError("This work order has no production process yet")
++    else:
++        process = await db.get(ProductionProcess, data.process_id)
++        if not process:
++            raise NotFoundError("Production process not found")
++        if process.work_order_id:
++            work_order = await db.get(WorkOrder, process.work_order_id)
++
++    if process.stage == ProcessStage.COMPLETED:
++        raise ConflictError("This order is already completed")
++    if process.stage == ProcessStage.CANCELLED:
++        raise ConflictError("This order was cancelled")
++
++    now = datetime.now(timezone.utc)
++    result = await db.execute(
++        select(StaffTask).where(StaffTask.process_id == process.id).with_for_update()
++    )
++    task = result.scalar_one_or_none()
++    if task:
++        if task.status == TaskStatus.ASSIGNED:
++            raise ConflictError("This order is already assigned to staff")
++        if task.status == TaskStatus.READY_FOR_DISPATCH:
++            raise ConflictError("Staff have already finished this order")
++        # Withdrawn earlier — send it out again from scratch.
++        task.status = TaskStatus.ASSIGNED
++        task.note = data.note
++        task.assigned_by_id = owner.id
++        task.assigned_by_name = owner.full_name
++        task.assigned_at = now
++        task.completed_by_id = None
++        task.completed_by_name = None
++        task.completed_at = None
++        task.completed_quantity = None
++        task.completion_note = None
++    else:
++        task = StaffTask(
++            process_id=process.id,
++            work_order_id=work_order.id if work_order else None,
++            status=TaskStatus.ASSIGNED,
++            note=data.note,
++            assigned_by_id=owner.id,
++            assigned_by_name=owner.full_name,
++            assigned_at=now,
++        )
++        db.add(task)
++    await db.flush()
++
++    # Tell every active staff member.
++    fg = await db.get(Item, process.fg_item_id)
++    item_name = fg.name if fg else "an item"
++    qty_text = f"{_fmt_qty(process.target_quantity)} {(fg.unit_of_measure if fg and fg.unit_of_measure else '')}".strip()
++    due = process.order_delivery_date or (work_order.delivery_date if work_order else None)
++
++    lines = [
++        f"{owner.full_name} assigned a new order: {qty_text} of {item_name} "
++        f"({process.process_number})."
++    ]
++    if due:
++        lines.append(f"Due: {due:%d %b %Y}.")
++    if data.note:
++        lines.append(f"Note from the owner: {data.note}")
++
++    staff = await notification_service.active_users_with_role(db, UserRole.STAFF)
++    emails = await notification_service.notify_users(
++        db,
++        staff,
++        kind="task_assigned",
++        title=f"New order: {qty_text} {item_name}",
++        message="\n".join(lines),
++        link="/staff",
++    )
++    return await _serialize(db, task), len(staff), emails
++
++
++async def list_tasks_for_owner(
++    db: AsyncSession, *, include_cancelled: bool = False, limit: int = 200
++) -> list[dict]:
++    result = await db.execute(
++        select(StaffTask).order_by(StaffTask.id.desc()).limit(limit)
++    )
++    out: list[dict] = []
++    for task in result.scalars().all():
++        data = await _serialize(db, task, include_materials=False)
++        if data["status"] == TaskStatus.CANCELLED and not include_cancelled:
++            continue
++        out.append(data)
++    return out
++
++
++async def cancel_task(
++    db: AsyncSession, *, task_id: int, owner: User
++) -> tuple[dict, list[EmailMessage]]:
++    """Withdraw an order that staff haven't finished yet."""
++    task = await db.get(StaffTask, task_id)
++    if not task:
++        raise NotFoundError("Task not found")
++    process = await db.get(ProductionProcess, task.process_id)
++    if _effective_status(task, process) != TaskStatus.ASSIGNED:
++        raise ConflictError("Only orders that are still with staff can be withdrawn")
++
++    task.status = TaskStatus.CANCELLED
++    await db.flush()
++
++    fg = await db.get(Item, process.fg_item_id)
++    staff = await notification_service.active_users_with_role(db, UserRole.STAFF)
++    emails = await notification_service.notify_users(
++        db,
++        staff,
++        kind="task_cancelled",
++        title=f"Order withdrawn: {fg.name if fg else process.process_number}",
++        message=(
++            f"{owner.full_name} withdrew {process.process_number}. "
++            "You no longer need to work on it."
++        ),
++        link="/staff",
++        send_email=False,
++    )
++    return await _serialize(db, task, include_materials=False), emails
++
++
++# ─── Staff: shared dashboard / finish an order ───────────────────────────────
++
++
++async def staff_dashboard(db: AsyncSession) -> dict:
++    """The one list every staff member sees: what's to do, and what was just done."""
++    assigned = (
++        await db.execute(
++            select(StaffTask)
++            .where(StaffTask.status == TaskStatus.ASSIGNED)
++            .order_by(StaffTask.assigned_at.asc(), StaffTask.id.asc())
++        )
++    ).scalars().all()
++    finished = (
++        await db.execute(
++            select(StaffTask)
++            .where(StaffTask.status == TaskStatus.READY_FOR_DISPATCH)
++            .order_by(StaffTask.completed_at.desc(), StaffTask.id.desc())
++            .limit(_RECENT_DONE_LIMIT)
++        )
++    ).scalars().all()
++
++    todo: list[dict] = []
++    done: list[dict] = []
++    for task in assigned:
++        data = await _serialize(db, task)
++        if data["status"] == TaskStatus.ASSIGNED:
++            todo.append(data)
++        elif data["status"] == TaskStatus.READY_FOR_DISPATCH:
++            done.append(data)  # owner finished it directly
++        # cancelled via the process -> no longer relevant to staff
++    for task in finished:
++        done.append(await _serialize(db, task, include_materials=False))
++
++    done.sort(key=lambda d: d["completed_at"] or d["assigned_at"], reverse=True)
++    return {"todo": todo, "done": done[:_RECENT_DONE_LIMIT]}
++
++
++async def complete_task(
++    db: AsyncSession, *, task_id: int, data: CompleteTaskRequest, user: User
++) -> tuple[dict, list[EmailMessage]]:
++    """Staff tick "done": finish the production process and tell the owner.
++
++    Completing the process is what makes the order ready for dispatch — it adds
++    the finished goods to stock (and takes the raw materials out if they were
++    not issued yet), exactly like the owner's "Mark as Complete" button.
++    """
++    # Lock the task row so two people pressing "done" together can't both finish it.
++    result = await db.execute(
++        select(StaffTask).where(StaffTask.id == task_id).with_for_update()
++    )
++    task = result.scalar_one_or_none()
++    if not task:
++        raise NotFoundError("Task not found")
++
++    process = await db.get(ProductionProcess, task.process_id)
++    if task.status == TaskStatus.CANCELLED or process.stage == ProcessStage.CANCELLED:
++        raise ConflictError("The owner withdrew this order")
++    if task.status == TaskStatus.READY_FOR_DISPATCH:
++        raise ConflictError("This order is already marked as done")
++
++    if process.stage == ProcessStage.COMPLETED:
++        # The owner already completed it from the Production page — just close the task.
++        summary = await ProductionProcessService.get(db, process.id)
++    else:
++        summary = await ProductionProcessService.complete(
++            db, process.id, data.completed_quantity, user.full_name
++        )
++
++    task.status = TaskStatus.READY_FOR_DISPATCH
++    task.completed_by_id = user.id
++    task.completed_by_name = user.full_name
++    task.completed_at = datetime.now(timezone.utc)
++    task.completed_quantity = summary["completed_quantity"]
++    task.completion_note = data.note
++    await db.flush()
++
++    # Tell the owner(s) it's ready to dispatch.
++    item_name = summary["fg_name"] or summary["process_number"]
++    done_qty = _fmt_qty(summary["completed_quantity"])
++    target_qty = _fmt_qty(summary["target_quantity"])
++    qty_text = f"{done_qty} {summary['fg_uom'] or ''}".strip()
++    if done_qty != target_qty:
++        qty_text += f" (target was {target_qty})"
++
++    message = (
++        f"{user.full_name} finished {summary['process_number']}: "
++        f"{qty_text} of {item_name}. It is ready to dispatch."
++    )
++    if data.note:
++        message += f"\nNote from staff: {data.note}"
++
++    owners = await notification_service.active_users_with_role(
++        db, UserRole.OWNER, exclude_user_id=user.id
++    )
++    emails = await notification_service.notify_users(
++        db,
++        owners,
++        kind="task_ready_for_dispatch",
++        title=f"Ready for dispatch: {item_name}",
++        message=message,
++        link=_dispatch_link(process.id, summary.get("linked_sales_order_id")),
++    )
++    return await _serialize(db, task, include_materials=False), emails
+diff -ruN a/apps/api/app/modules/users/dependencies.py b/apps/api/app/modules/users/dependencies.py
+--- a/apps/api/app/modules/users/dependencies.py	2026-10-05 19:30:31.260553459 +0000
++++ b/apps/api/app/modules/users/dependencies.py	2026-10-05 19:30:31.279011083 +0000
+@@ -9,7 +9,7 @@
+ from app.core.database import get_db
+ from app.core.exceptions import ForbiddenError, UnauthorizedError
+ from app.core.security import decode_access_token
+-from app.modules.users.models import Module, User
++from app.modules.users.models import Module, User, UserRole
+ from app.modules.users.services import get_user_by_id
+ 
+ 
+@@ -51,6 +51,13 @@
+ 
+ async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+     """Dependency that requires the user to have the USERS module (admin-level access)."""
+-    if Module.USERS not in current_user.modules:
++    if current_user.role != UserRole.OWNER or Module.USERS not in current_user.modules:
+         raise ForbiddenError(detail="Admin access required")
+     return current_user
++
++
++async def require_owner(current_user: User = Depends(get_current_user)) -> User:
++    """Dependency that only lets owner accounts through (staff are turned away)."""
++    if current_user.role != UserRole.OWNER:
++        raise ForbiddenError(detail="This area is only available to the owner")
++    return current_user
+diff -ruN a/apps/api/app/modules/users/models.py b/apps/api/app/modules/users/models.py
+--- a/apps/api/app/modules/users/models.py	2026-10-05 19:30:31.260620783 +0000
++++ b/apps/api/app/modules/users/models.py	2026-10-05 19:30:31.279024781 +0000
+@@ -24,6 +24,13 @@
+     SETTINGS = "settings"
+ 
+ 
++class UserRole(str, enum.Enum):
++    """Who the account belongs to. Owners see everything; staff only see their task dashboard."""
++
++    OWNER = "owner"
++    STAFF = "staff"
++
++
+ class User(Base):
+     __tablename__ = "users"
+ 
+@@ -37,6 +44,18 @@
+     full_name: Mapped[str] = mapped_column(String(100), nullable=False)
+     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
++    role: Mapped[UserRole] = mapped_column(
++        Enum(
++            UserRole,
++            native_enum=False,
++            length=20,
++            values_callable=lambda x: [e.value for e in x],
++        ),
++        default=UserRole.OWNER,
++        server_default=UserRole.OWNER.value,
++        nullable=False,
++        index=True,
++    )
+     created_at: Mapped[datetime] = mapped_column(
+         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+     )
+@@ -61,6 +80,14 @@
+     def module_permissions(self) -> list[Module]:
+         return self.modules
+ 
++    @property
++    def is_owner(self) -> bool:
++        return self.role == UserRole.OWNER
++
++    @property
++    def is_staff(self) -> bool:
++        return self.role == UserRole.STAFF
++
+     def __repr__(self) -> str:
+         return f"<User {self.username}>"
+ 
+diff -ruN a/apps/api/app/modules/users/router.py b/apps/api/app/modules/users/router.py
+--- a/apps/api/app/modules/users/router.py	2026-10-05 19:30:31.260685317 +0000
++++ b/apps/api/app/modules/users/router.py	2026-10-05 19:30:31.279039040 +0000
+@@ -2,13 +2,16 @@
+ API endpoints for authentication and user management.
+ """
+ 
++from datetime import timedelta
++
+ from fastapi import APIRouter, Depends, Query
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from app.core.config import settings
+ from app.core.database import get_db
+ from app.core.security import create_access_token
+ from app.modules.users.dependencies import get_current_user, require_admin
+-from app.modules.users.models import User
++from app.modules.users.models import User, UserRole
+ from app.modules.users.schemas import (
+     LoginRequest,
+     PasswordReset,
+@@ -31,8 +34,15 @@
+ @router.post("/login", response_model=TokenResponse)
+ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+     """Authenticate with username + password, returns a JWT."""
+-    user = await services.authenticate_user(db, body.username, body.password)
+-    token = create_access_token(data={"sub": str(user.id)})
++    user = await services.authenticate_user(
++        db, body.username, body.password, login_as=body.login_as
++    )
++    expires = (
++        timedelta(minutes=settings.STAFF_ACCESS_TOKEN_EXPIRE_MINUTES)
++        if user.role == UserRole.STAFF
++        else None  # owners use the default lifetime
++    )
++    token = create_access_token(data={"sub": str(user.id)}, expires_delta=expires)
+     return TokenResponse(access_token=token)
+ 
+ 
+diff -ruN a/apps/api/app/modules/users/schemas.py b/apps/api/app/modules/users/schemas.py
+--- a/apps/api/app/modules/users/schemas.py	2026-10-05 19:30:31.260751772 +0000
++++ b/apps/api/app/modules/users/schemas.py	2026-10-05 19:30:31.279090554 +0000
+@@ -8,7 +8,7 @@
+ 
+ from pydantic import BaseModel, EmailStr, Field
+ 
+-from app.modules.users.models import Module
++from app.modules.users.models import Module, UserRole
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -19,6 +19,9 @@
+ class LoginRequest(BaseModel):
+     username: str = Field(..., min_length=3, max_length=50)
+     password: str = Field(..., min_length=6)
++    # Optional: which login screen was used ("owner" or "staff"). When given, the
++    # account must match it, so staff can't sign in through the owner login (and vice versa).
++    login_as: UserRole | None = None
+ 
+ 
+ class TokenResponse(BaseModel):
+@@ -36,6 +39,8 @@
+     email: EmailStr
+     full_name: str = Field(..., min_length=1, max_length=100)
+     password: str = Field(..., min_length=6)
++    role: UserRole = UserRole.OWNER
++    # Ignored for staff accounts — staff only get the task dashboard.
+     module_permissions: list[Module] = []
+ 
+ 
+@@ -56,6 +61,7 @@
+     email: str
+     full_name: str
+     is_active: bool
++    role: UserRole
+     module_permissions: list[Module]
+     created_at: datetime
+     updated_at: datetime
+diff -ruN a/apps/api/app/modules/users/services.py b/apps/api/app/modules/users/services.py
+--- a/apps/api/app/modules/users/services.py	2026-10-05 19:30:31.260813518 +0000
++++ b/apps/api/app/modules/users/services.py	2026-10-05 19:30:31.279106036 +0000
+@@ -5,23 +5,46 @@
+ from sqlalchemy import delete, func, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+-from app.core.exceptions import ConflictError, NotFoundError, UnauthorizedError
++from app.core.exceptions import (
++    ConflictError,
++    ForbiddenError,
++    NotFoundError,
++    UnauthorizedError,
++)
+ from app.core.security import hash_password, verify_password
+-from app.modules.users.models import Module, User, UserModuleAccess
++from app.modules.users.models import Module, User, UserModuleAccess, UserRole
+ from app.modules.users.schemas import UserCreate, UserUpdate
+ 
+ # Modules automatically granted to every user
+ _AUTO_GRANT = {Module.DASHBOARD, Module.PARTIES}
+ 
+ 
+-async def authenticate_user(db: AsyncSession, username: str, password: str) -> User:
+-    """Verify credentials and return the user, or raise UnauthorizedError."""
++async def authenticate_user(
++    db: AsyncSession,
++    username: str,
++    password: str,
++    login_as: UserRole | None = None,
++) -> User:
++    """Verify credentials and return the user, or raise UnauthorizedError.
++
++    If ``login_as`` is given, the account's role must match the login screen used.
++    """
+     result = await db.execute(select(User).where(User.username == username))
+     user = result.scalar_one_or_none()
+     if not user or not verify_password(password, user.hashed_password):
+         raise UnauthorizedError(detail="Incorrect username or password")
+     if not user.is_active:
+         raise UnauthorizedError(detail="Account is deactivated")
++    if login_as is not None and user.role != login_as:
++        # Right password, wrong door: 403 (not 401) so the web app shows the message
++        # instead of treating it as an expired session.
++        if user.role == UserRole.STAFF:
++            raise ForbiddenError(
++                detail="This is a staff account. Please use the Staff login."
++            )
++        raise ForbiddenError(
++            detail="This is an owner account. Please use the Owner login."
++        )
+     return user
+ 
+ 
+@@ -40,13 +63,16 @@
+         email=data.email,
+         full_name=data.full_name,
+         hashed_password=hash_password(data.password),
++        role=data.role,
+     )
+     db.add(user)
+     await db.flush()  # assigns user.id
+ 
+-    all_modules = set(data.module_permissions) | _AUTO_GRANT
+-    for mod in all_modules:
+-        db.add(UserModuleAccess(user_id=user.id, module=mod))
++    # Staff never get owner modules — they only see the task dashboard.
++    if data.role == UserRole.OWNER:
++        all_modules = set(data.module_permissions) | _AUTO_GRANT
++        for mod in all_modules:
++            db.add(UserModuleAccess(user_id=user.id, module=mod))
+ 
+     await db.flush()
+     await db.refresh(user)
+@@ -81,7 +107,7 @@
+     for field, value in update_data.items():
+         setattr(user, field, value)
+ 
+-    if new_modules is not None:
++    if new_modules is not None and user.role == UserRole.OWNER:
+         await db.execute(
+             delete(UserModuleAccess).where(UserModuleAccess.user_id == user_id)
+         )
+diff -ruN a/apps/api/app/seed.py b/apps/api/app/seed.py
+--- a/apps/api/app/seed.py	2026-10-05 19:30:31.260882489 +0000
++++ b/apps/api/app/seed.py	2026-10-05 19:30:31.279305029 +0000
+@@ -14,7 +14,7 @@
+ from app.core.config import settings
+ from app.core.database import async_session
+ from app.core.security import hash_password
+-from app.modules.users.models import Module, User, UserModuleAccess
++from app.modules.users.models import Module, User, UserModuleAccess, UserRole
+ 
+ # Import all models so they are registered with SQLAlchemy metadata
+ from app.modules.parties.models import Party  # noqa: F401
+@@ -27,6 +27,8 @@
+ from app.modules.dispatch.models import Dispatch  # noqa: F401
+ from app.modules.copilot.models import CopilotThread, CopilotChart  # noqa: F401
+ from app.modules.settings.models import Setting  # noqa: F401
++from app.modules.notifications.models import Notification  # noqa: F401
++from app.modules.tasks.models import StaffTask  # noqa: F401
+ from app.modules.settings.services import seed_default_settings
+ 
+ 
+@@ -116,6 +118,7 @@
+             full_name=settings.ADMIN_FULL_NAME,
+             hashed_password=hash_password(settings.ADMIN_PASSWORD),
+             is_active=True,
++            role=UserRole.OWNER,
+         )
+         session.add(admin)
+         await session.flush()  # assigns admin.id
+diff -ruN a/apps/api/create_tables.py b/apps/api/create_tables.py
+--- a/apps/api/create_tables.py	2026-10-05 19:30:31.260967021 +0000
++++ b/apps/api/create_tables.py	2026-10-05 19:30:31.279328424 +0000
+@@ -13,6 +13,8 @@
+ import app.modules.dispatch.models
+ import app.modules.copilot.models
+ import app.modules.settings.models
++import app.modules.notifications.models
++import app.modules.tasks.models
+ 
+ def create():
+     engine = create_engine(settings.DATABASE_URL_SYNC)
+diff -ruN a/apps/web/src/app/router.tsx b/apps/web/src/app/router.tsx
+--- a/apps/web/src/app/router.tsx	2026-10-05 19:30:31.262704998 +0000
++++ b/apps/web/src/app/router.tsx	2026-10-05 19:30:31.279628655 +0000
+@@ -1,10 +1,13 @@
+ import { Routes, Route, Navigate } from "react-router-dom";
+ import AppLayout from "@/components/layout/AppLayout";
++import StaffLayout from "@/components/layout/StaffLayout";
++import StaffDashboardPage from "@/pages/staff/StaffDashboardPage";
+ import AccessDenied from "@/components/feedback/AccessDenied";
+ import LoginPage from "@/pages/auth/LoginPage";
+ import DashboardPage from "@/pages/dashboard/DashboardPage";
+ import UserListPage from "@/pages/users/UserListPage";
+-import { isAuthenticated, hasModule } from "@/app/store";
++import { isAuthenticated, hasModule, getUser, homePathFor } from "@/app/store";
++import type { UserRole } from "@/app/store";
+ import CompanyListPage from "@/pages/companies/CompanyListPage";
+ 
+ // 1. Import your new Detail View (Already there)
+@@ -43,10 +46,24 @@
+ import SettingsPage from "@/pages/settings/SettingsPage";
+ 
+ 
+-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+-    if (!isAuthenticated()) {
++/**
++ * Keeps signed-out visitors on the login page, and keeps each kind of account in
++ * its own area: staff are sent to their dashboard, owners to the main app.
++ */
++function ProtectedRoute({
++    children,
++    role,
++}: {
++    children: React.ReactNode;
++    role: UserRole;
++}) {
++    const user = getUser();
++    if (!isAuthenticated() || !user) {
+         return <Navigate to="/login" replace />;
+     }
++    if (user.role !== role) {
++        return <Navigate to={homePathFor(user)} replace />;
++    }
+     return <>{children}</>;
+ }
+ 
+@@ -70,7 +87,7 @@
+             <Route
+                 path="/"
+                 element={
+-                    <ProtectedRoute>
++                    <ProtectedRoute role="owner">
+                         <AppLayout />
+                     </ProtectedRoute>
+                 }
+@@ -149,6 +166,19 @@
+                 />
+ 
+             </Route>
++
++            {/* Staff: one shared task dashboard, nothing else */}
++            <Route
++                path="/staff"
++                element={
++                    <ProtectedRoute role="staff">
++                        <StaffLayout />
++                    </ProtectedRoute>
++                }
++            >
++                <Route index element={<StaffDashboardPage />} />
++            </Route>
++
+             <Route path="*" element={<Navigate to="/" replace />} />
+         </Routes>
+     );
+diff -ruN a/apps/web/src/app/store.ts b/apps/web/src/app/store.ts
+--- a/apps/web/src/app/store.ts	2026-10-05 19:30:31.262842511 +0000
++++ b/apps/web/src/app/store.ts	2026-10-05 19:30:31.279648617 +0000
+@@ -3,11 +3,15 @@
+  * Stores JWT token and user info in localStorage.
+  */
+ 
++/** "owner" sees everything; "staff" only sees the shared task dashboard. */
++export type UserRole = "owner" | "staff";
++
+ export interface AuthUser {
+   id: number;
+   username: string;
+   email: string;
+   full_name: string;
++  role: UserRole;
+   module_permissions: string[];
+ }
+ 
+@@ -28,6 +32,10 @@
+       clearAuth();
+       return null;
+     }
++    // Sessions saved before staff accounts existed always belonged to owners
++    if (user.role !== "owner" && user.role !== "staff") {
++      user.role = "owner";
++    }
+     return user;
+   } catch {
+     return null;
+@@ -53,3 +61,13 @@
+   const user = getUser();
+   return !!user && Array.isArray(user.module_permissions) && user.module_permissions.includes(module);
+ }
++
++/** True when the signed-in user is a staff member (task dashboard only). */
++export function isStaff(): boolean {
++  return getUser()?.role === "staff";
++}
++
++/** Where a user lands after signing in. */
++export function homePathFor(user: AuthUser | null): string {
++  return user?.role === "staff" ? "/staff" : "/app/home";
++}
+diff -ruN a/apps/web/src/components/layout/AppSidebar.tsx b/apps/web/src/components/layout/AppSidebar.tsx
+--- a/apps/web/src/components/layout/AppSidebar.tsx	2026-10-05 19:30:31.263611711 +0000
++++ b/apps/web/src/components/layout/AppSidebar.tsx	2026-10-05 19:30:31.279790269 +0000
+@@ -20,6 +20,7 @@
+ import { useSidebar } from "@/hooks/use-sidebar-state";
+ import { clearAuth, hasModule } from "@/app/store";
+ import { settingsApi } from "@/features/settings/api";
++import NotificationBell from "@/features/notifications/components/NotificationBell";
+ 
+ const navGroups = [
+     {
+@@ -288,6 +289,9 @@
+                 borderTop: '1px solid rgba(51, 65, 85, 0.4)',
+                 background: '#0F172A',
+             }}>
++                {/* Notifications (new staff updates, orders ready to dispatch) */}
++                <NotificationBell variant="sidebar" collapsed={collapsed} />
++
+                 {/* Users & Team */}
+                 {hasModule("users") && <Link
+                     to="/app/users"
+diff -ruN a/apps/web/src/components/layout/StaffLayout.tsx b/apps/web/src/components/layout/StaffLayout.tsx
+--- a/apps/web/src/components/layout/StaffLayout.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/components/layout/StaffLayout.tsx	2026-10-05 19:30:31.279811674 +0000
+@@ -0,0 +1,56 @@
++/**
++ * @component StaffLayout
++ *
++ * The only screen frame staff see: a slim top bar (brand, notifications, who's
++ * signed in, log out) above the task dashboard. No owner menus.
++ */
++
++import { Outlet, useNavigate } from "react-router-dom";
++import { Button, Tag } from "antd";
++import { LogoutOutlined } from "@ant-design/icons";
++import { clearAuth, getUser } from "@/app/store";
++import NotificationBell from "@/features/notifications/components/NotificationBell";
++
++export default function StaffLayout() {
++    const navigate = useNavigate();
++    const user = getUser();
++
++    const handleLogout = () => {
++        clearAuth();
++        navigate("/login");
++    };
++
++    return (
++        <div className="min-h-screen bg-[#f8fafc]">
++            <header
++                className="sticky top-0 z-40 flex h-16 items-center justify-between bg-white px-4 sm:px-8"
++                style={{ borderBottom: "1px solid #e5e7eb" }}
++            >
++                <div className="flex items-center gap-3">
++                    <div
++                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white font-bold text-sm"
++                        style={{ background: "linear-gradient(135deg, #3b82f6, #1d4ed8)" }}
++                    >
++                        Q
++                    </div>
++                    <span style={{ fontSize: 18, fontWeight: 700, color: "#0f172a" }}>QuadStack</span>
++                    <Tag color="green" style={{ marginInlineEnd: 0 }}>Staff</Tag>
++                </div>
++
++                <div className="flex items-center gap-3 sm:gap-4">
++                    <NotificationBell variant="header" />
++                    <span className="hidden sm:inline" style={{ fontSize: 14, color: "#475569" }}>
++                        {user?.full_name}
++                    </span>
++                    <Button icon={<LogoutOutlined />} onClick={handleLogout}>
++                        Log out
++                    </Button>
++                </div>
++            </header>
++
++            <main className="mx-auto w-full max-w-[960px] px-4 py-6 sm:px-8 sm:py-8">
++                <Outlet />
++            </main>
++        </div>
++    );
++}
+diff -ruN a/apps/web/src/features/auth/api/auth.ts b/apps/web/src/features/auth/api/auth.ts
+--- a/apps/web/src/features/auth/api/auth.ts	2026-10-05 19:30:31.264122663 +0000
++++ b/apps/web/src/features/auth/api/auth.ts	2026-10-05 19:30:31.279920855 +0000
+@@ -8,6 +8,8 @@
+ interface LoginPayload {
+   username: string;
+   password: string;
++  /** Which login screen was used — the account must match it. */
++  login_as?: "owner" | "staff";
+ }
+ 
+ interface TokenResponse {
+diff -ruN a/apps/web/src/features/notifications/api/index.ts b/apps/web/src/features/notifications/api/index.ts
+--- a/apps/web/src/features/notifications/api/index.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/features/notifications/api/index.ts	2026-10-05 19:30:31.281682511 +0000
+@@ -0,0 +1,33 @@
++/**
++ * Notifications API — the bell menu and browser pop-ups read from here.
++ */
++
++import api from "@/lib/axios";
++
++export interface AppNotification {
++  id: number;
++  type: string;
++  title: string;
++  message: string;
++  link: string | null;
++  is_read: boolean;
++  created_at: string;
++}
++
++export const notificationApi = {
++  list: async (limit = 30) => {
++    const res = await api.get<{ notifications: AppNotification[]; unread_count: number }>(
++      "/notifications/",
++      { params: { limit } },
++    );
++    return res.data;
++  },
++  markRead: async (id: number) => {
++    const res = await api.post<{ unread_count: number }>(`/notifications/${id}/read`);
++    return res.data;
++  },
++  markAllRead: async () => {
++    const res = await api.post<{ unread_count: number }>("/notifications/read-all");
++    return res.data;
++  },
++};
+diff -ruN a/apps/web/src/features/notifications/components/NotificationBell.tsx b/apps/web/src/features/notifications/components/NotificationBell.tsx
+--- a/apps/web/src/features/notifications/components/NotificationBell.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/features/notifications/components/NotificationBell.tsx	2026-10-05 19:30:31.281713935 +0000
+@@ -0,0 +1,223 @@
++/**
++ * @component NotificationBell
++ *
++ * Bell with an unread count and a menu of recent notifications. Used in the
++ * owner's sidebar ("sidebar") and the staff top bar ("header").
++ */
++
++import { useState } from "react";
++import { Badge, Button, Popover, Typography } from "antd";
++import { BellOutlined } from "@ant-design/icons";
++import { Bell } from "lucide-react";
++import { timeAgo } from "@/lib/time";
++import { useNotifications } from "../useNotifications";
++import type { AppNotification } from "../api";
++
++const { Text } = Typography;
++
++interface Props {
++  variant: "sidebar" | "header";
++  /** Sidebar only: show just the icon. */
++  collapsed?: boolean;
++}
++
++function NotificationItem({ n, onOpen }: { n: AppNotification; onOpen: (n: AppNotification) => void }) {
++  return (
++    <button
++      type="button"
++      onClick={() => onOpen(n)}
++      style={{
++        display: "flex",
++        gap: 10,
++        width: "100%",
++        textAlign: "left",
++        padding: "10px 8px",
++        border: "none",
++        borderBottom: "1px solid #f0f0f0",
++        background: n.is_read ? "#fff" : "#f0f7ff",
++        cursor: n.link ? "pointer" : "default",
++      }}
++    >
++      <span
++        aria-hidden
++        style={{
++          marginTop: 6,
++          width: 8,
++          height: 8,
++          flexShrink: 0,
++          borderRadius: "50%",
++          background: n.is_read ? "transparent" : "#1677ff",
++        }}
++      />
++      <span style={{ minWidth: 0, flex: 1 }}>
++        <span
++          style={{
++            display: "block",
++            fontSize: 14,
++            fontWeight: n.is_read ? 500 : 700,
++            color: "#262626",
++          }}
++        >
++          {n.title}
++        </span>
++        <span
++          style={{
++            display: "-webkit-box",
++            WebkitLineClamp: 2,
++            WebkitBoxOrient: "vertical",
++            overflow: "hidden",
++            fontSize: 13,
++            color: "#595959",
++            whiteSpace: "pre-line",
++          }}
++        >
++          {n.message}
++        </span>
++        <span style={{ display: "block", marginTop: 2, fontSize: 12, color: "#8c8c8c" }}>
++          {timeAgo(n.created_at)}
++        </span>
++      </span>
++    </button>
++  );
++}
++
++export default function NotificationBell({ variant, collapsed = false }: Props) {
++  const { items, unread, permission, openNotification, markAllRead, enableBrowserAlerts } =
++    useNotifications();
++  const [open, setOpen] = useState(false);
++
++  const handleOpen = (n: AppNotification) => {
++    setOpen(false);
++    void openNotification(n);
++  };
++
++  const menu = (
++    <div style={{ width: 340, maxWidth: "calc(100vw - 80px)" }}>
++      <div
++        style={{
++          display: "flex",
++          alignItems: "center",
++          justifyContent: "space-between",
++          paddingBottom: 8,
++          borderBottom: "1px solid #f0f0f0",
++        }}
++      >
++        <Text strong>Notifications</Text>
++        <Button type="link" size="small" disabled={unread === 0} onClick={() => void markAllRead()}>
++          Mark all as read
++        </Button>
++      </div>
++
++      <div style={{ maxHeight: 360, overflowY: "auto" }}>
++        {items.length === 0 ? (
++          <div style={{ padding: "28px 8px", textAlign: "center", color: "#8c8c8c", fontSize: 13 }}>
++            Nothing yet. New orders and updates will show up here.
++          </div>
++        ) : (
++          items.map((n) => <NotificationItem key={n.id} n={n} onOpen={handleOpen} />)
++        )}
++      </div>
++
++      {permission === "default" && (
++        <div style={{ paddingTop: 12, borderTop: "1px solid #f0f0f0" }}>
++          <Text type="secondary" style={{ display: "block", fontSize: 13, marginBottom: 8 }}>
++            Get a pop-up in your browser when something new comes in.
++          </Text>
++          <Button type="primary" size="small" onClick={() => void enableBrowserAlerts()}>
++            Turn on browser alerts
++          </Button>
++        </div>
++      )}
++      {permission === "denied" && (
++        <div style={{ paddingTop: 12, borderTop: "1px solid #f0f0f0" }}>
++          <Text type="secondary" style={{ fontSize: 13 }}>
++            Browser alerts are blocked for this site. Allow notifications in your browser's site
++            settings to get pop-ups.
++          </Text>
++        </div>
++      )}
++    </div>
++  );
++
++  const trigger =
++    variant === "header" ? (
++      <Badge count={unread} size="small" overflowCount={99}>
++        <Button
++          shape="circle"
++          aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
++          icon={<BellOutlined style={{ fontSize: 18 }} />}
++        />
++      </Badge>
++    ) : (
++      <button
++        type="button"
++        aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
++        style={{
++          position: "relative",
++          display: "flex",
++          width: "100%",
++          alignItems: "center",
++          gap: 12,
++          borderRadius: 8,
++          padding: "10px 12px",
++          fontSize: 15,
++          fontWeight: 500,
++          border: "none",
++          cursor: "pointer",
++          textAlign: "left",
++          background: open ? "rgba(30, 64, 175, 0.15)" : "transparent",
++          color: open ? "#60a5fa" : "#94a3b8",
++          transition: "all 0.2s ease",
++        }}
++      >
++        <span style={{ position: "relative", display: "flex", flexShrink: 0 }}>
++          <Bell style={{ width: 20, height: 20 }} />
++          {unread > 0 && collapsed && (
++            <span
++              aria-hidden
++              style={{
++                position: "absolute",
++                top: -2,
++                right: -2,
++                width: 9,
++                height: 9,
++                borderRadius: "50%",
++                background: "#ef4444",
++                border: "2px solid #0F172A",
++              }}
++            />
++          )}
++        </span>
++        {!collapsed && <span style={{ whiteSpace: "nowrap", flex: 1 }}>Notifications</span>}
++        {!collapsed && unread > 0 && (
++          <span
++            style={{
++              minWidth: 20,
++              padding: "0 6px",
++              borderRadius: 10,
++              background: "#ef4444",
++              color: "#fff",
++              fontSize: 12,
++              fontWeight: 700,
++              lineHeight: "20px",
++              textAlign: "center",
++            }}
++          >
++            {unread > 99 ? "99+" : unread}
++          </span>
++        )}
++      </button>
++    );
++
++  return (
++    <Popover
++      content={menu}
++      trigger="click"
++      open={open}
++      onOpenChange={setOpen}
++      placement={variant === "header" ? "bottomRight" : "rightBottom"}
++    >
++      {trigger}
++    </Popover>
++  );
++}
+diff -ruN a/apps/web/src/features/notifications/useBrowserAlerts.ts b/apps/web/src/features/notifications/useBrowserAlerts.ts
+--- a/apps/web/src/features/notifications/useBrowserAlerts.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/features/notifications/useBrowserAlerts.ts	2026-10-05 19:30:31.281731558 +0000
+@@ -0,0 +1,45 @@
++/**
++ * useBrowserAlerts — whether this browser will show pop-up notifications for
++ * QuadStack, and a way to ask for permission.
++ *
++ * Kept separate from useNotifications so a page can show an "enable alerts"
++ * prompt without starting a second polling loop. Every copy of the hook stays
++ * in sync, so turning alerts on in the bell menu also clears the banner on the
++ * dashboard.
++ */
++
++import { useCallback, useEffect, useState } from "react";
++
++export type BrowserPermission = "unsupported" | "default" | "granted" | "denied";
++
++const PERMISSION_EVENT = "qs:browser-permission";
++
++export function readPermission(): BrowserPermission {
++  if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
++  return Notification.permission;
++}
++
++export function useBrowserAlerts() {
++  const [permission, setPermission] = useState<BrowserPermission>(readPermission);
++
++  useEffect(() => {
++    const sync = () => setPermission(readPermission());
++    window.addEventListener(PERMISSION_EVENT, sync);
++    return () => window.removeEventListener(PERMISSION_EVENT, sync);
++  }, []);
++
++  /** Must be called from a click — browsers ignore permission requests otherwise. */
++  const enableBrowserAlerts = useCallback(async () => {
++    if (readPermission() === "unsupported") return;
++    const result = await Notification.requestPermission();
++    window.dispatchEvent(new Event(PERMISSION_EVENT));
++    if (result === "granted") {
++      new Notification("Browser alerts are on", {
++        body: "You'll see a pop-up here when something needs you.",
++        tag: "qs-enabled",
++      });
++    }
++  }, []);
++
++  return { permission, enableBrowserAlerts };
++}
+diff -ruN a/apps/web/src/features/notifications/useNotifications.ts b/apps/web/src/features/notifications/useNotifications.ts
+--- a/apps/web/src/features/notifications/useNotifications.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/features/notifications/useNotifications.ts	2026-10-05 19:30:31.281651884 +0000
+@@ -0,0 +1,133 @@
++/**
++ * useNotifications — keeps the bell menu up to date and pops a browser
++ * notification when something new arrives.
++ *
++ * It asks the server every few seconds (and again whenever the tab is focused).
++ * Browser pop-ups need the tab to be open (it can be in the background) and the
++ * person to have allowed notifications for this site.
++ */
++
++import { useCallback, useEffect, useRef, useState } from "react";
++import { useNavigate } from "react-router-dom";
++import { getUser } from "@/app/store";
++import { notificationApi } from "./api";
++import type { AppNotification } from "./api";
++import { readPermission, useBrowserAlerts } from "./useBrowserAlerts";
++
++const POLL_MS = 10_000;
++/** More new items than this at once are folded into a single pop-up. */
++const MAX_POPUPS = 3;
++
++/** Fired on `window` whenever new notifications arrive, so open pages can refresh themselves. */
++export const NOTIFICATIONS_EVENT = "qs:notifications";
++
++export function useNotifications() {
++  const navigate = useNavigate();
++  const navigateRef = useRef(navigate);
++  useEffect(() => {
++    navigateRef.current = navigate;
++  }, [navigate]);
++
++  const [items, setItems] = useState<AppNotification[]>([]);
++  const [unread, setUnread] = useState(0);
++  const { permission, enableBrowserAlerts } = useBrowserAlerts();
++
++  // Highest notification id we've already shown a pop-up for (remembered per person,
++  // so a page reload doesn't repeat old pop-ups).
++  const lastSeenId = useRef<number | null>(null);
++  const storageKey = `qs_last_notified_${getUser()?.id ?? "anon"}`;
++
++  const openNotification = useCallback(async (n: AppNotification) => {
++    if (!n.is_read) {
++      try {
++        const res = await notificationApi.markRead(n.id);
++        setUnread(res.unread_count);
++        setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
++      } catch {
++        /* the link should still work */
++      }
++    }
++    if (n.link) navigateRef.current(n.link);
++  }, []);
++
++  const showPopup = useCallback(
++    (n: AppNotification) => {
++      const popup = new Notification(n.title, { body: n.message, tag: `qs-${n.id}` });
++      popup.onclick = () => {
++        window.focus();
++        popup.close();
++        void openNotification(n);
++      };
++    },
++    [openNotification],
++  );
++
++  const refresh = useCallback(async () => {
++    try {
++      const data = await notificationApi.list(30);
++      setItems(data.notifications);
++      setUnread(data.unread_count);
++
++      const newest = data.notifications.reduce((max, n) => Math.max(max, n.id), 0);
++
++      if (lastSeenId.current === null) {
++        // First load in this tab: anything that arrived while the app was closed
++        // counts as new; if we've never seen this person before, treat what's there as seen.
++        const stored = Number(localStorage.getItem(storageKey));
++        lastSeenId.current = Number.isFinite(stored) && stored > 0 ? stored : newest;
++      }
++
++      const fresh = data.notifications
++        .filter((n) => n.id > (lastSeenId.current ?? 0) && !n.is_read)
++        .sort((a, b) => a.id - b.id);
++
++      if (fresh.length > 0) {
++        if (readPermission() === "granted") {
++          if (fresh.length > MAX_POPUPS) {
++            new Notification(`${fresh.length} new notifications`, {
++              body: "Open QuadStack to read them.",
++              tag: "qs-many",
++            });
++          } else {
++            fresh.forEach(showPopup);
++          }
++        }
++        window.dispatchEvent(new CustomEvent(NOTIFICATIONS_EVENT));
++      }
++
++      if (newest > (lastSeenId.current ?? 0)) {
++        lastSeenId.current = newest;
++        localStorage.setItem(storageKey, String(newest));
++      }
++    } catch {
++      /* offline, or signed out — try again on the next tick */
++    }
++  }, [showPopup, storageKey]);
++
++  useEffect(() => {
++    void refresh();
++    const timer = window.setInterval(() => void refresh(), POLL_MS);
++    const onWake = () => {
++      if (document.visibilityState === "visible") void refresh();
++    };
++    window.addEventListener("focus", onWake);
++    document.addEventListener("visibilitychange", onWake);
++    return () => {
++      window.clearInterval(timer);
++      window.removeEventListener("focus", onWake);
++      document.removeEventListener("visibilitychange", onWake);
++    };
++  }, [refresh]);
++
++  const markAllRead = useCallback(async () => {
++    try {
++      await notificationApi.markAllRead();
++      setUnread(0);
++      setItems((prev) => prev.map((n) => ({ ...n, is_read: true })));
++    } catch {
++      /* leave things as they are; the next refresh will correct the badge */
++    }
++  }, []);
++
++  return { items, unread, permission, openNotification, markAllRead, enableBrowserAlerts };
++}
+diff -ruN a/apps/web/src/features/tasks/api/index.ts b/apps/web/src/features/tasks/api/index.ts
+--- a/apps/web/src/features/tasks/api/index.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/features/tasks/api/index.ts	2026-10-05 19:30:31.281579795 +0000
+@@ -0,0 +1,73 @@
++/**
++ * Staff task API.
++ *  - taskApi:      owner side — send an order to staff, see what's out, withdraw it.
++ *  - staffTaskApi: staff side — the shared task list and "done, ready for dispatch".
++ */
++
++import api from "@/lib/axios";
++
++export type TaskStatus = "assigned" | "ready_for_dispatch" | "cancelled";
++
++export interface TaskMaterial {
++  item_name?: string | null;
++  item_sku?: string | null;
++  unit_of_measure?: string | null;
++  quantity: number;
++}
++
++export interface StaffTask {
++  id: number;
++  status: TaskStatus;
++  process_id: number;
++  process_number: string;
++  work_order_id?: number | null;
++  order_number?: string | null;
++  item_name?: string | null;
++  item_sku?: string | null;
++  uom?: string | null;
++  target_quantity: number;
++  completed_quantity?: number | null;
++  delivery_date?: string | null;
++  note?: string | null;
++  assigned_by_name?: string | null;
++  assigned_at: string;
++  completed_by_name?: string | null;
++  completed_at?: string | null;
++  completion_note?: string | null;
++  materials: TaskMaterial[];
++}
++
++export interface StaffDashboard {
++  todo: StaffTask[];
++  done: StaffTask[];
++}
++
++// ─── Owner ──────────────────────────────────────────────────────────────────
++
++export const taskApi = {
++  assign: async (data: { work_order_id?: number; process_id?: number; note?: string }) => {
++    const res = await api.post<{ task: StaffTask; notified_staff: number }>("/tasks/assign", data);
++    return res.data;
++  },
++  list: async (params?: { include_cancelled?: boolean }) => {
++    const res = await api.get<{ tasks: StaffTask[]; total: number }>("/tasks/", { params });
++    return res.data;
++  },
++  cancel: async (id: number) => {
++    const res = await api.post<StaffTask>(`/tasks/${id}/cancel`);
++    return res.data;
++  },
++};
++
++// ─── Staff ──────────────────────────────────────────────────────────────────
++
++export const staffTaskApi = {
++  dashboard: async () => {
++    const res = await api.get<StaffDashboard>("/staff/tasks");
++    return res.data;
++  },
++  complete: async (id: number, data: { completed_quantity?: number; note?: string }) => {
++    const res = await api.post<StaffTask>(`/staff/tasks/${id}/complete`, data);
++    return res.data;
++  },
++};
+diff -ruN a/apps/web/src/features/tasks/components/AssignToStaffModal.tsx b/apps/web/src/features/tasks/components/AssignToStaffModal.tsx
+--- a/apps/web/src/features/tasks/components/AssignToStaffModal.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/features/tasks/components/AssignToStaffModal.tsx	2026-10-05 19:30:31.281616337 +0000
+@@ -0,0 +1,85 @@
++/**
++ * @component AssignToStaffModal
++ *
++ * The owner sends a work order to staff. Every staff member is notified (browser
++ * pop-up + email) and the order appears on the shared staff dashboard.
++ */
++
++import { useState } from "react";
++import { Form, Input, Modal, Typography } from "antd";
++import { message } from "@/lib/antdHelper";
++import { extractApiError } from "@/lib/errors";
++import { formatQty } from "@/lib/time";
++import { taskApi } from "@/features/tasks/api";
++import type { WorkOrder } from "@/features/production/api";
++
++const { Text } = Typography;
++
++interface Props {
++  workOrder: WorkOrder | null;
++  onClose: () => void;
++  onSuccess: () => void;
++}
++
++export default function AssignToStaffModal({ workOrder, onClose, onSuccess }: Props) {
++  const [form] = Form.useForm<{ note?: string }>();
++  const [saving, setSaving] = useState(false);
++
++  const handleSend = async () => {
++    if (!workOrder) return;
++    const values = await form.validateFields();
++
++    setSaving(true);
++    try {
++      const res = await taskApi.assign({
++        work_order_id: workOrder.id,
++        note: values.note?.trim() || undefined,
++      });
++      if (res.notified_staff === 0) {
++        message.warning(
++          "Assigned, but there are no active staff accounts yet. Add staff under Users & Team so they can see it.",
++        );
++      } else {
++        message.success(
++          `Sent to ${res.notified_staff} staff ${res.notified_staff === 1 ? "member" : "members"}`,
++        );
++      }
++      onSuccess();
++      onClose();
++    } catch (err) {
++      message.error(extractApiError(err, "Could not assign this order"));
++    } finally {
++      setSaving(false);
++    }
++  };
++
++  return (
++    <Modal
++      title="Assign to staff"
++      open={!!workOrder}
++      onCancel={onClose}
++      onOk={() => void handleSend()}
++      okText="Send to staff"
++      confirmLoading={saving}
++      destroyOnHidden
++    >
++      {workOrder && (
++        <Form form={form} layout="vertical" preserve={false}>
++          <div style={{ marginBottom: 16 }}>
++            <Text strong style={{ fontSize: 16 }}>
++              {workOrder.item_name ?? "Work order"} · {formatQty(workOrder.quantity)} {workOrder.uom}
++            </Text>
++            <Text type="secondary" style={{ display: "block", marginTop: 4 }}>
++              Every staff member gets a browser notification and an email, and sees this order on their
++              dashboard.
++              {workOrder.process_stage === "open" && " Production starts for this order automatically."}
++            </Text>
++          </div>
++          <Form.Item name="note" label="Note for staff (optional)">
++            <Input.TextArea rows={3} maxLength={1000} placeholder="For example: use the dark varnish" />
++          </Form.Item>
++        </Form>
++      )}
++    </Modal>
++  );
++}
+diff -ruN a/apps/web/src/features/users/api/users.ts b/apps/web/src/features/users/api/users.ts
+--- a/apps/web/src/features/users/api/users.ts	2026-10-05 19:30:31.268437557 +0000
++++ b/apps/web/src/features/users/api/users.ts	2026-10-05 19:30:31.281342916 +0000
+@@ -9,6 +9,8 @@
+   username: string;
+   email: string;
+   full_name: string;
++  /** "owner" sees everything; "staff" only gets the task dashboard. */
++  role: "owner" | "staff";
+   module_permissions: string[];
+   is_active: boolean;
+   created_at: string;
+@@ -25,7 +27,9 @@
+   email: string;
+   full_name: string;
+   password: string;
+-  module_permissions: string[];
++  role?: "owner" | "staff";
++  /** Ignored for staff accounts. */
++  module_permissions?: string[];
+ }
+ 
+ export interface UpdateUserPayload {
+diff -ruN a/apps/web/src/lib/axios.ts b/apps/web/src/lib/axios.ts
+--- a/apps/web/src/lib/axios.ts	2026-10-05 19:30:31.268894842 +0000
++++ b/apps/web/src/lib/axios.ts	2026-10-05 19:30:31.281883606 +0000
+@@ -24,7 +24,9 @@
+ api.interceptors.response.use(
+   (response) => response,
+   (error) => {
+-    if (error.response?.status === 401) {
++    // On the login page a 401 just means "wrong password" — let the form show it
++    // instead of reloading the page and losing the message.
++    if (error.response?.status === 401 && !window.location.pathname.startsWith("/login")) {
+       clearAuth();
+       window.location.href = "/login";
+     }
+diff -ruN a/apps/web/src/lib/errors.ts b/apps/web/src/lib/errors.ts
+--- a/apps/web/src/lib/errors.ts	2026-10-05 19:30:31.268958139 +0000
++++ b/apps/web/src/lib/errors.ts	2026-10-05 19:30:31.281896316 +0000
+@@ -22,3 +22,27 @@
+     fallback
+   );
+ }
++
++/**
++ * Message for a failed sign-in. Tells "wrong password" apart from "the server isn't
++ * working", which would otherwise both show up as a vague "Login failed".
++ */
++export function describeLoginError(err: unknown): string {
++  const response = (err as { response?: { status?: number; data?: { detail?: unknown } } })
++    ?.response;
++
++  const detail = response?.data?.detail;
++  if (typeof detail === "string") return detail;
++
++  if (!response) {
++    return "Can't reach the QuadStack server. Check that it is running, then try again.";
++  }
++  if (response.status !== undefined && response.status >= 500) {
++    return (
++      `The server ran into a problem (error ${response.status}). If you just updated QuadStack, ` +
++      "restart the API: run docker compose restart api. If it keeps happening, check " +
++      "docker compose logs api."
++    );
++  }
++  return "Login failed";
++}
+diff -ruN a/apps/web/src/lib/time.ts b/apps/web/src/lib/time.ts
+--- a/apps/web/src/lib/time.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/lib/time.ts	2026-10-05 19:30:31.281910618 +0000
+@@ -0,0 +1,44 @@
++/**
++ * Small date helpers shared by the notification menu and the staff dashboard.
++ */
++
++/** "just now", "5 min ago", "3 hours ago", "2 days ago", or a date for anything older. */
++export function timeAgo(iso: string | null | undefined): string {
++  if (!iso) return "";
++  const then = new Date(iso).getTime();
++  if (Number.isNaN(then)) return "";
++
++  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
++  if (seconds < 45) return "just now";
++  const minutes = Math.round(seconds / 60);
++  if (minutes < 60) return `${minutes} min ago`;
++  const hours = Math.round(minutes / 60);
++  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
++  const days = Math.round(hours / 24);
++  if (days < 7) return `${days} ${days === 1 ? "day" : "days"} ago`;
++  return formatDate(iso);
++}
++
++/** "12 Oct 2026" */
++export function formatDate(iso: string | null | undefined): string {
++  if (!iso) return "";
++  const date = new Date(iso);
++  if (Number.isNaN(date.getTime())) return "";
++  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
++}
++
++/** True when the date is before the start of today. */
++export function isOverdue(iso: string | null | undefined): boolean {
++  if (!iso) return false;
++  const date = new Date(iso);
++  if (Number.isNaN(date.getTime())) return false;
++  const startOfToday = new Date();
++  startOfToday.setHours(0, 0, 0, 0);
++  return date.getTime() < startOfToday.getTime();
++}
++
++/** 50 -> "50", 48.5 -> "48.5" (no trailing zeros). */
++export function formatQty(value: number | null | undefined): string {
++  if (value === null || value === undefined) return "";
++  return String(Number(value.toFixed(2)));
++}
+diff -ruN a/apps/web/src/pages/auth/LoginPage.tsx b/apps/web/src/pages/auth/LoginPage.tsx
+--- a/apps/web/src/pages/auth/LoginPage.tsx	2026-10-05 19:30:31.269325264 +0000
++++ b/apps/web/src/pages/auth/LoginPage.tsx	2026-10-05 19:30:31.282077783 +0000
+@@ -4,31 +4,53 @@
+ 
+ import { useState } from "react";
+ import { useNavigate } from "react-router-dom";
+-import { Card, Form, Input, Button, Typography } from 'antd';
++import { Card, Form, Input, Button, Typography, Segmented } from 'antd';
+ import { message } from '@/lib/antdHelper';
+ import { UserOutlined, LockOutlined } from "@ant-design/icons";
+ import { loginApi, fetchCurrentUser } from "@/features/auth";
+-import { setAuth } from "@/app/store";
+-import { extractApiError } from "@/lib/errors";
++import { setAuth, homePathFor } from "@/app/store";
++import { describeLoginError } from "@/lib/errors";
+ 
+ const { Title, Text } = Typography;
+ 
++type LoginMode = "owner" | "staff";
++const MODE_KEY = "qs_login_mode";
++
++/** Shop-floor screens stay on the Staff tab: remember the last one used on this device. */
++function savedMode(): LoginMode {
++  try {
++    return localStorage.getItem(MODE_KEY) === "staff" ? "staff" : "owner";
++  } catch {
++    return "owner";
++  }
++}
++
+ export default function LoginPage() {
+   const [loading, setLoading] = useState(false);
++  const [mode, setMode] = useState<LoginMode>(savedMode);
+   const navigate = useNavigate();
+ 
++  const changeMode = (next: LoginMode) => {
++    setMode(next);
++    try {
++      localStorage.setItem(MODE_KEY, next);
++    } catch {
++      /* private browsing — the tab still works, it just isn't remembered */
++    }
++  };
++
+   const onFinish = async (values: { username: string; password: string }) => {
+     setLoading(true);
+     try {
+-      const { access_token } = await loginApi(values);
++      const { access_token } = await loginApi({ ...values, login_as: mode });
+       // Temporarily store token to make the /me call
+       localStorage.setItem("qs_token", access_token);
+       const user = await fetchCurrentUser();
+       setAuth(access_token, user);
+       message.success(`Welcome, ${user.full_name}`);
+-      navigate("/app/home");
++      navigate(homePathFor(user));
+     } catch (err: unknown) {
+-      message.error(extractApiError(err, "Login failed"));
++      message.error(describeLoginError(err));
+     } finally {
+       setLoading(false);
+     }
+@@ -49,9 +71,22 @@
+           <Title level={3} style={{ marginBottom: 4 }}>
+             QuadStack
+           </Title>
+-          <Text type="secondary">Sign in to your account</Text>
++          <Text type="secondary">
++            {mode === "staff" ? "Sign in to see your orders" : "Sign in to your account"}
++          </Text>
+         </div>
+ 
++        <Segmented<LoginMode>
++          block
++          value={mode}
++          onChange={changeMode}
++          options={[
++            { label: "Owner", value: "owner" },
++            { label: "Staff", value: "staff" },
++          ]}
++          style={{ marginBottom: 20 }}
++        />
++
+         <Form layout="vertical" onFinish={onFinish} autoComplete="off">
+           <Form.Item
+             name="username"
+@@ -85,7 +120,7 @@
+               block
+               size="large"
+             >
+-              Login
++              {mode === "staff" ? "Log in as staff" : "Log in as owner"}
+             </Button>
+           </Form.Item>
+         </Form>
+diff -ruN a/apps/web/src/pages/production/ProductionListPage.tsx b/apps/web/src/pages/production/ProductionListPage.tsx
+--- a/apps/web/src/pages/production/ProductionListPage.tsx	2026-10-05 19:30:31.271215215 +0000
++++ b/apps/web/src/pages/production/ProductionListPage.tsx	2026-10-05 19:30:31.282413313 +0000
+@@ -2,7 +2,8 @@
+ import { Table, Button, Typography, Tag, Space, Input, Select, Tabs, Tooltip, Popconfirm, message } from "antd";
+ import {
+   PlusOutlined, SearchOutlined, ArrowUpOutlined, ArrowDownOutlined,
+-  CaretRightOutlined, DeleteOutlined, InfoCircleOutlined, SettingOutlined, CheckCircleOutlined, TruckOutlined
++  CaretRightOutlined, DeleteOutlined, InfoCircleOutlined, SettingOutlined, CheckCircleOutlined, TruckOutlined,
++  SendOutlined, UndoOutlined,
+ } from "@ant-design/icons";
+ import { useNavigate } from "react-router-dom";
+ import {
+@@ -13,6 +14,10 @@
+ import CreateWorkOrderModal from "@/features/production/components/CreateWorkOrderModal";
+ import ViewBomModal from "@/features/production/components/ViewBomModal";
+ import CompleteProcessModal from "@/features/production/components/CompleteProcessModal";
++import AssignToStaffModal from "@/features/tasks/components/AssignToStaffModal";
++import { taskApi } from "@/features/tasks/api";
++import type { StaffTask } from "@/features/tasks/api";
++import { extractApiError } from "@/lib/errors";
+ 
+ const { Title, Text } = Typography;
+ 
+@@ -244,6 +249,9 @@
+   const [stageFilter, setStageFilter] = useState("all");
+   const [createOpen, setCreateOpen] = useState(false);
+   const [localRefresh, setLocalRefresh] = useState(0);
++  // Orders already sent to staff, keyed by work order id
++  const [staffTasks, setStaffTasks] = useState<Record<number, StaffTask>>({});
++  const [assignTarget, setAssignTarget] = useState<WorkOrder | null>(null);
+ 
+   const fetch = async () => {
+     setLoading(true);
+@@ -253,6 +261,17 @@
+       const res = await workOrderApi.list(params);
+       setData(res.orders);
+     } catch { /* empty */ } finally { setLoading(false); }
++
++    try {
++      const res = await taskApi.list();
++      const byWorkOrder: Record<number, StaffTask> = {};
++      for (const task of res.tasks) {
++        if (task.work_order_id != null && !byWorkOrder[task.work_order_id]) {
++          byWorkOrder[task.work_order_id] = task; // list is newest first
++        }
++      }
++      setStaffTasks(byWorkOrder);
++    } catch { /* the staff column is optional — the rest of the page still works */ }
+   };
+ 
+   useEffect(() => { fetch(); }, [stageFilter, refreshTick, localRefresh]);
+@@ -280,6 +299,22 @@
+     }
+   };
+ 
++  const withdrawFromStaff = async (taskId: number) => {
++    try {
++      await taskApi.cancel(taskId);
++      message.success("Order withdrawn from staff");
++      fetch();
++    } catch (err) {
++      message.error(extractApiError(err, "Could not withdraw this order"));
++    }
++  };
++
++  const staffTag = (task?: StaffTask) => {
++    if (task?.status === "assigned") return <Tag color="blue">With staff</Tag>;
++    if (task?.status === "ready_for_dispatch") return <Tag color="green">Ready for dispatch</Tag>;
++    return "-";
++  };
++
+   const columns = [
+     { title: col("Item ID"), dataIndex: "item_sku", key: "item_sku", render: (v: string) => v || "-" },
+     { title: col("Item Name"), dataIndex: "item_name", key: "item_name", render: (v: string) => <Text style={{ fontWeight: 500 }}>{v || "-"}</Text> },
+@@ -294,20 +329,39 @@
+     { title: col("Document Date"), key: "document_date", render: (_: unknown, r: WorkOrder) => fmtDate(r.document_date) },
+     { title: col("Delivery Date"), key: "delivery_date", render: (_: unknown, r: WorkOrder) => fmtDate(r.delivery_date) },
+     { title: col("Created By"), dataIndex: "created_by", key: "created_by", render: (v: string) => v || "-" },
++    { title: col("Staff"), key: "staff", render: (_: unknown, r: WorkOrder) => staffTag(staffTasks[r.id]) },
+     {
+-      title: "Actions", key: "actions", fixed: "right" as const, width: 100,
+-      render: (_: unknown, r: WorkOrder) => (
++      title: "Actions", key: "actions", fixed: "right" as const, width: 150,
++      render: (_: unknown, r: WorkOrder) => {
++        const task = staffTasks[r.id];
++        const withStaff = task?.status === "assigned";
++        const sentToStaff = withStaff || task?.status === "ready_for_dispatch";
++        const canAssign = (r.process_stage === "open" || r.process_stage === "in_progress") && !sentToStaff;
++        return (
+         <Space>
+           {r.process_stage === "open" && (
+             <Tooltip title="Start Production Process">
+               <Button type="text" icon={<CaretRightOutlined style={{ color: "#52c41a" }} />} onClick={() => startProcess(r.id)} />
+             </Tooltip>
+           )}
++          {canAssign && (
++            <Tooltip title="Assign to staff">
++              <Button type="text" icon={<SendOutlined style={{ color: "#1677ff" }} />} onClick={() => setAssignTarget(r)} />
++            </Tooltip>
++          )}
++          {withStaff && task && (
++            <Popconfirm title="Withdraw this order from staff?" onConfirm={() => withdrawFromStaff(task.id)}>
++              <Tooltip title="Withdraw from staff">
++                <Button type="text" icon={<UndoOutlined style={{ color: "#fa8c16" }} />} />
++              </Tooltip>
++            </Popconfirm>
++          )}
+           <Popconfirm title="Delete this work order?" onConfirm={() => deleteWO(r.id)}>
+             <Button type="text" icon={<DeleteOutlined style={{ color: "#ff4d4f" }} />} />
+           </Popconfirm>
+         </Space>
+-      ),
++        );
++      },
+     },
+   ];
+ 
+@@ -357,6 +411,11 @@
+       </div>
+ 
+       <CreateWorkOrderModal open={createOpen} onClose={() => setCreateOpen(false)} onSuccess={() => setLocalRefresh(t => t + 1)} />
++      <AssignToStaffModal
++        workOrder={assignTarget}
++        onClose={() => setAssignTarget(null)}
++        onSuccess={() => { setLocalRefresh(t => t + 1); onProcessCreated(); }}
++      />
+     </>
+   );
+ }
+diff -ruN a/apps/web/src/pages/staff/StaffDashboardPage.tsx b/apps/web/src/pages/staff/StaffDashboardPage.tsx
+--- a/apps/web/src/pages/staff/StaffDashboardPage.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/apps/web/src/pages/staff/StaffDashboardPage.tsx	2026-10-05 19:30:31.283331274 +0000
+@@ -0,0 +1,331 @@
++/**
++ * Staff dashboard — one shared list of orders to complete.
++ *
++ * Every staff member sees the same tasks. When someone finishes an order and
++ * ticks it off, it moves to "Recently finished" for everyone and the owner is
++ * told it's ready for dispatch.
++ */
++
++import { useCallback, useEffect, useState } from "react";
++import { Button, Form, Input, InputNumber, Modal, Spin, Tag, Typography } from "antd";
++import { CheckCircleOutlined, ReloadOutlined } from "@ant-design/icons";
++import { message } from "@/lib/antdHelper";
++import { extractApiError } from "@/lib/errors";
++import { formatDate, formatQty, isOverdue, timeAgo } from "@/lib/time";
++import { staffTaskApi } from "@/features/tasks/api";
++import type { StaffDashboard, StaffTask } from "@/features/tasks/api";
++import { NOTIFICATIONS_EVENT } from "@/features/notifications/useNotifications";
++import { useBrowserAlerts } from "@/features/notifications/useBrowserAlerts";
++
++const { Title, Text } = Typography;
++
++const REFRESH_MS = 15_000;
++
++// ─── One order waiting to be done ───────────────────────────────────────────
++
++function TodoCard({ task, onFinish }: { task: StaffTask; onFinish: (t: StaffTask) => void }) {
++    const overdue = isOverdue(task.delivery_date);
++
++    return (
++        <div
++            className="bg-white rounded-lg border border-gray-200"
++            style={{ padding: "20px 24px", boxShadow: "0 1px 3px rgba(0,0,0,0.02)" }}
++        >
++            <div className="flex flex-wrap items-start justify-between gap-2">
++                <div>
++                    <Title level={4} style={{ margin: 0, fontWeight: 700 }}>
++                        {task.item_name ?? task.process_number}
++                    </Title>
++                    <Text type="secondary" style={{ fontSize: 13 }}>
++                        {task.process_number}
++                        {task.order_number ? ` · Order ${task.order_number}` : ""}
++                    </Text>
++                </div>
++                <div style={{ textAlign: "right" }}>
++                    <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: "#0f172a" }}>
++                        {formatQty(task.target_quantity)}
++                        <span style={{ fontSize: 15, fontWeight: 500, color: "#64748b", marginLeft: 6 }}>
++                            {task.uom}
++                        </span>
++                    </div>
++                    {task.delivery_date && (
++                        <Text style={{ fontSize: 13, color: overdue ? "#cf1322" : "#64748b" }}>
++                            {overdue ? "Overdue · was due " : "Due "}
++                            {formatDate(task.delivery_date)}
++                        </Text>
++                    )}
++                </div>
++            </div>
++
++            {task.note && (
++                <div
++                    style={{
++                        marginTop: 16,
++                        padding: "10px 14px",
++                        borderRadius: 6,
++                        background: "#fffbe6",
++                        border: "1px solid #ffe58f",
++                    }}
++                >
++                    <Text strong style={{ display: "block", fontSize: 12, color: "#ad6800" }}>
++                        Note from {task.assigned_by_name ?? "the owner"}
++                    </Text>
++                    <Text style={{ whiteSpace: "pre-wrap" }}>{task.note}</Text>
++                </div>
++            )}
++
++            {task.materials.length > 0 && (
++                <div style={{ marginTop: 16 }}>
++                    <Text strong style={{ display: "block", fontSize: 13, marginBottom: 6 }}>
++                        Materials for this order
++                    </Text>
++                    <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
++                        {task.materials.map((m, i) => (
++                            <div
++                                key={`${m.item_sku ?? m.item_name}-${i}`}
++                                className="flex justify-between gap-3"
++                                style={{ fontSize: 14, borderBottom: "1px dashed #f0f0f0", padding: "3px 0" }}
++                            >
++                                <span style={{ color: "#334155" }}>{m.item_name}</span>
++                                <span style={{ color: "#64748b", whiteSpace: "nowrap" }}>
++                                    {formatQty(m.quantity)} {m.unit_of_measure}
++                                </span>
++                            </div>
++                        ))}
++                    </div>
++                </div>
++            )}
++
++            <div className="flex flex-wrap items-center justify-between gap-3" style={{ marginTop: 20 }}>
++                <Text type="secondary" style={{ fontSize: 12 }}>
++                    Sent by {task.assigned_by_name ?? "the owner"} · {timeAgo(task.assigned_at)}
++                </Text>
++                <Button type="primary" size="large" icon={<CheckCircleOutlined />} onClick={() => onFinish(task)}>
++                    Done, ready for dispatch
++                </Button>
++            </div>
++        </div>
++    );
++}
++
++// ─── One finished order ─────────────────────────────────────────────────────
++
++function DoneRow({ task }: { task: StaffTask }) {
++    const made = task.completed_quantity ?? task.target_quantity;
++    return (
++        <div
++            className="flex flex-wrap items-center justify-between gap-2"
++            style={{ padding: "12px 0", borderBottom: "1px solid #f5f5f5" }}
++        >
++            <div>
++                <Text strong>{task.item_name ?? task.process_number}</Text>
++                <Text type="secondary" style={{ marginLeft: 8 }}>
++                    {formatQty(made)} {task.uom}
++                    {made !== task.target_quantity ? ` of ${formatQty(task.target_quantity)}` : ""}
++                </Text>
++                <div style={{ fontSize: 12, color: "#8c8c8c" }}>
++                    {task.completed_by_name ? `Done by ${task.completed_by_name} · ` : "Done · "}
++                    {timeAgo(task.completed_at ?? task.assigned_at)}
++                </div>
++            </div>
++            <Tag color="gold" style={{ marginInlineEnd: 0 }}>Waiting for dispatch</Tag>
++        </div>
++    );
++}
++
++// ─── Page ───────────────────────────────────────────────────────────────────
++
++export default function StaffDashboardPage() {
++    const [data, setData] = useState<StaffDashboard>({ todo: [], done: [] });
++    const [loading, setLoading] = useState(true);
++    const [loadFailed, setLoadFailed] = useState(false);
++    const [finishing, setFinishing] = useState<StaffTask | null>(null);
++    const [saving, setSaving] = useState(false);
++    const [form] = Form.useForm<{ completed_quantity: number | null; note?: string }>();
++    const { permission, enableBrowserAlerts } = useBrowserAlerts();
++
++    const load = useCallback(async () => {
++        try {
++            setData(await staffTaskApi.dashboard());
++            setLoadFailed(false);
++        } catch {
++            setLoadFailed(true);
++        } finally {
++            setLoading(false);
++        }
++    }, []);
++
++    // Load now, then keep the list fresh: on a timer, when the tab is focused again,
++    // and the moment a new notification arrives.
++    useEffect(() => {
++        void load();
++        const timer = window.setInterval(() => void load(), REFRESH_MS);
++        const onWake = () => void load();
++        window.addEventListener("focus", onWake);
++        window.addEventListener(NOTIFICATIONS_EVENT, onWake);
++        return () => {
++            window.clearInterval(timer);
++            window.removeEventListener("focus", onWake);
++            window.removeEventListener(NOTIFICATIONS_EVENT, onWake);
++        };
++    }, [load]);
++
++    const openFinish = (task: StaffTask) => {
++        form.setFieldsValue({ completed_quantity: task.target_quantity, note: "" });
++        setFinishing(task);
++    };
++
++    const submitFinish = async () => {
++        if (!finishing) return;
++        let values: { completed_quantity: number | null; note?: string };
++        try {
++            values = await form.validateFields();
++        } catch {
++            return;
++        }
++
++        setSaving(true);
++        try {
++            await staffTaskApi.complete(finishing.id, {
++                completed_quantity: values.completed_quantity ?? undefined,
++                note: values.note?.trim() || undefined,
++            });
++            message.success("Done. The owner has been told this order is ready for dispatch.");
++            setFinishing(null);
++            await load();
++        } catch (err) {
++            const detail = extractApiError(err, "Could not mark this order as done");
++            message.error(
++                detail.toLowerCase().includes("insufficient stock")
++                    ? `${detail} Tell the owner so they can restock, then try again.`
++                    : detail,
++            );
++            await load();
++        } finally {
++            setSaving(false);
++        }
++    };
++
++    return (
++        <div>
++            <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
++                <div>
++                    <Title level={3} style={{ margin: 0, fontWeight: 700, color: "#262626" }}>
++                        Orders to complete
++                    </Title>
++                    <Text type="secondary">
++                        Everyone on staff sees this same list. When an order is finished, mark it done and the
++                        owner is told it's ready for dispatch.
++                    </Text>
++                </div>
++                <Button icon={<ReloadOutlined />} onClick={() => void load()}>
++                    Refresh
++                </Button>
++            </div>
++
++            {permission === "default" && (
++                <div
++                    className="flex flex-wrap items-center justify-between gap-3 mb-6"
++                    style={{ padding: "12px 16px", borderRadius: 8, background: "#e6f4ff", border: "1px solid #91caff" }}
++                >
++                    <Text>Get a pop-up in this browser the moment the owner sends you a new order.</Text>
++                    <Button type="primary" onClick={() => void enableBrowserAlerts()}>
++                        Turn on browser alerts
++                    </Button>
++                </div>
++            )}
++            {permission === "denied" && (
++                <div
++                    className="mb-6"
++                    style={{ padding: "12px 16px", borderRadius: 8, background: "#fff7e6", border: "1px solid #ffd591" }}
++                >
++                    <Text>
++                        Browser alerts are blocked for this site, so you won't get pop-ups. Allow notifications in
++                        your browser's site settings, or keep this page open and check the bell.
++                    </Text>
++                </div>
++            )}
++
++            {loading ? (
++                <div className="flex justify-center" style={{ padding: 64 }}>
++                    <Spin size="large" />
++                </div>
++            ) : (
++                <>
++                    {loadFailed && (
++                        <div
++                            className="mb-4"
++                            style={{ padding: "10px 14px", borderRadius: 8, background: "#fff1f0", border: "1px solid #ffa39e" }}
++                        >
++                            <Text>Couldn't refresh the list. Check your connection; this page will keep trying.</Text>
++                        </div>
++                    )}
++
++                    {data.todo.length === 0 ? (
++                        <div
++                            className="bg-white rounded-lg border border-gray-200 text-center"
++                            style={{ padding: "48px 24px" }}
++                        >
++                            <Title level={5} style={{ margin: 0 }}>No orders right now</Title>
++                            <Text type="secondary">
++                                When the owner sends an order, it appears here and you get a notification.
++                            </Text>
++                        </div>
++                    ) : (
++                        <div className="flex flex-col gap-4">
++                            <Text strong style={{ fontSize: 15 }}>
++                                To do ({data.todo.length})
++                            </Text>
++                            {data.todo.map((task) => (
++                                <TodoCard key={task.id} task={task} onFinish={openFinish} />
++                            ))}
++                        </div>
++                    )}
++
++                    {data.done.length > 0 && (
++                        <div style={{ marginTop: 40 }}>
++                            <Text strong style={{ fontSize: 15 }}>Recently finished</Text>
++                            <div
++                                className="bg-white rounded-lg border border-gray-200"
++                                style={{ padding: "4px 24px", marginTop: 12 }}
++                            >
++                                {data.done.map((task) => (
++                                    <DoneRow key={task.id} task={task} />
++                                ))}
++                            </div>
++                        </div>
++                    )}
++                </>
++            )}
++
++            <Modal
++                title="Mark this order as done"
++                open={!!finishing}
++                onCancel={() => setFinishing(null)}
++                onOk={() => void submitFinish()}
++                okText="Mark as done"
++                confirmLoading={saving}
++                destroyOnHidden
++            >
++                {finishing && (
++                    <Form form={form} layout="vertical" preserve={false}>
++                        <Text style={{ display: "block", marginBottom: 16 }}>
++                            {finishing.item_name} ({finishing.process_number}). The owner will be told it's ready
++                            for dispatch.
++                        </Text>
++                        <Form.Item
++                            name="completed_quantity"
++                            label={`How many ${finishing.uom ?? "units"} did you finish?`}
++                            rules={[{ required: true, message: "Enter how many you finished" }]}
++                        >
++                            <InputNumber min={0.01} style={{ width: "100%" }} size="large" />
++                        </Form.Item>
++                        <Form.Item name="note" label="Anything the owner should know? (optional)">
++                            <Input.TextArea rows={3} maxLength={1000} placeholder="For example: 2 pieces cracked" />
++                        </Form.Item>
++                    </Form>
++                )}
++            </Modal>
++        </div>
++    );
++}
+diff -ruN a/apps/web/src/pages/users/UserListPage.tsx b/apps/web/src/pages/users/UserListPage.tsx
+--- a/apps/web/src/pages/users/UserListPage.tsx	2026-10-05 19:30:31.273986625 +0000
++++ b/apps/web/src/pages/users/UserListPage.tsx	2026-10-05 19:30:31.283212887 +0000
+@@ -1,5 +1,5 @@
+ import { useEffect, useState, useCallback } from "react";
+-import { Table, Button, Tag, Modal, Form, Input, Typography, Space, Drawer, Switch, Dropdown, Checkbox } from 'antd';
++import { Table, Button, Tag, Modal, Form, Input, Typography, Space, Drawer, Switch, Dropdown, Checkbox, Radio } from 'antd';
+ import { message } from '@/lib/antdHelper';
+ import { PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, MoreOutlined, SearchOutlined, ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
+ import { fetchUsers, createUser, updateUser, resetUserPassword, deleteUser } from "@/features/users";
+@@ -32,6 +32,7 @@
+   // Modals & Drawers
+   const [createOpen, setCreateOpen] = useState(false);
+   const [createForm] = Form.useForm();
++  const createRole = Form.useWatch("role", createForm) as "owner" | "staff" | undefined;
+   const [editUser, setEditUser] = useState<User | null>(null);
+   const [editForm] = Form.useForm();
+   const [resetTarget, setResetTarget] = useState<User | null>(null);
+@@ -171,10 +172,21 @@
+     { title: renderColumnTitle("Full Name"), dataIndex: "full_name", key: "full_name" },
+     { title: renderColumnTitle("Email"), dataIndex: "email", key: "email" },
+     {
++      title: renderColumnTitle("Account", false),
++      dataIndex: "role",
++      key: "role",
++      render: (role: User["role"]) =>
++        role === "staff" ? <Tag color="green">Staff</Tag> : <Tag color="blue">Owner</Tag>,
++    },
++    {
+       title: renderColumnTitle("Modules", false),
+       dataIndex: "module_permissions",
+       key: "module_permissions",
+-      render: (modules: string[]) => (
++      render: (modules: string[], record: User) => record.role === "staff" ? (
++        <Tag style={{ borderRadius: '12px', fontSize: '11px', padding: '1px 8px', background: '#f6ffed', border: '1px solid #b7eb8f', color: '#389e0d' }}>
++          Task dashboard only
++        </Tag>
++      ) : (
+         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+           {modules.map(m => {
+             const label = MODULE_OPTIONS.find(o => o.value === m)?.label ?? m;
+@@ -250,17 +262,41 @@
+ 
+       <Modal title="Create New User" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()} okText="Create" destroyOnHidden>
+         <Form form={createForm} layout="vertical" onFinish={handleCreate} preserve={false}>
++          <Form.Item name="role" label="Account type" initialValue="owner">
++            <Radio.Group
++              optionType="button"
++              buttonStyle="solid"
++              options={[
++                { label: "Owner", value: "owner" },
++                { label: "Staff", value: "staff" },
++              ]}
++            />
++          </Form.Item>
+           <Form.Item name="username" label="Username" rules={[{ required: true, min: 3 }]}><Input /></Form.Item>
+           <Form.Item name="full_name" label="Full Name" rules={[{ required: true }]}><Input /></Form.Item>
+-          <Form.Item name="email" label="Email" rules={[{ required: true, type: "email" }]}><Input /></Form.Item>
+-          <Form.Item name="password" label="Password" rules={[{ required: true, min: 6 }]}><Input.Password /></Form.Item>
+-          <Form.Item name="module_permissions" label="Module Access">
+-            <Checkbox.Group style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+-              {MODULE_OPTIONS.map(opt => (
+-                <Checkbox key={opt.value} value={opt.value}>{opt.label}</Checkbox>
+-              ))}
+-            </Checkbox.Group>
++          <Form.Item
++            name="email"
++            label="Email"
++            rules={[{ required: true, type: "email" }]}
++            extra={createRole === "staff" ? "Order notifications are emailed here." : undefined}
++          >
++            <Input />
+           </Form.Item>
++          <Form.Item name="password" label="Password" rules={[{ required: true, min: 6 }]}><Input.Password /></Form.Item>
++          {createRole === "staff" ? (
++            <Text type="secondary" style={{ display: 'block' }}>
++              Staff only see the shared task dashboard. They get a browser notification and an email when you
++              assign an order, and they tell you when it is ready for dispatch.
++            </Text>
++          ) : (
++            <Form.Item name="module_permissions" label="Module Access">
++              <Checkbox.Group style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
++                {MODULE_OPTIONS.map(opt => (
++                  <Checkbox key={opt.value} value={opt.value}>{opt.label}</Checkbox>
++                ))}
++              </Checkbox.Group>
++            </Form.Item>
++          )}
+         </Form>
+       </Modal>
+ 
+@@ -269,13 +305,19 @@
+           <Form.Item name="full_name" label="Full Name" rules={[{ required: true }]}><Input /></Form.Item>
+           <Form.Item name="email" label="Email" rules={[{ required: true, type: "email" }]}><Input /></Form.Item>
+           <Form.Item name="is_active" label="Active" valuePropName="checked"><Switch /></Form.Item>
+-          <Form.Item name="module_permissions" label="Module Access">
+-            <Checkbox.Group style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+-              {MODULE_OPTIONS.map(opt => (
+-                <Checkbox key={opt.value} value={opt.value}>{opt.label}</Checkbox>
+-              ))}
+-            </Checkbox.Group>
+-          </Form.Item>
++          {editUser?.role === "staff" ? (
++            <Text type="secondary" style={{ display: 'block' }}>
++              Staff account: only sees the shared task dashboard.
++            </Text>
++          ) : (
++            <Form.Item name="module_permissions" label="Module Access">
++              <Checkbox.Group style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
++                {MODULE_OPTIONS.map(opt => (
++                  <Checkbox key={opt.value} value={opt.value}>{opt.label}</Checkbox>
++                ))}
++              </Checkbox.Group>
++            </Form.Item>
++          )}
+         </Form>
+       </Drawer>
+ 
+diff -ruN a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml	2026-10-05 19:30:31.274367136 +0000
++++ b/docker-compose.yml	2026-10-05 19:30:31.283455726 +0000
+@@ -25,6 +25,16 @@
+       timeout: 5s
+       retries: 5
+ 
++  # Catches every email the app sends while you're developing — nothing leaves your
++  # machine. Open http://localhost:8025 to read them.
++  # To send real email instead, set SMTP_HOST / SMTP_PORT / SMTP_USERNAME /
++  # SMTP_PASSWORD (and SMTP_USE_TLS=true) in your .env file.
++  mailpit:
++    image: axllent/mailpit:latest
++    ports:
++      - "8025:8025"   # web inbox
++      - "1025:1025"   # SMTP
++
+   api:
+     build: ./apps/api
+     ports:
+@@ -53,6 +63,15 @@
+       COPILOT_DB_USER: copilot_reader
+       COPILOT_DB_PASSWORD: copilot_reader_pass
+       COPILOT_CHARTS_DIR: /tmp/copilot_charts
++      # Notification emails (owner <-> staff). Defaults send to the local Mailpit inbox.
++      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
++      SMTP_HOST: ${SMTP_HOST:-mailpit}
++      SMTP_PORT: ${SMTP_PORT:-1025}
++      SMTP_USERNAME: ${SMTP_USERNAME:-}
++      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
++      SMTP_FROM: "${SMTP_FROM:-QuadStack <no-reply@quadstack.local>}"
++      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
++      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+     # Override CMD to seed then start with hot reload
+     command: sh -c "python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+     depends_on:
+diff -ruN a/pytests/tests/test_schema_errors.py b/pytests/tests/test_schema_errors.py
+--- a/pytests/tests/test_schema_errors.py	1970-01-01 00:00:00.000000000 +0000
++++ b/pytests/tests/test_schema_errors.py	2026-10-05 19:30:31.283767495 +0000
+@@ -0,0 +1,47 @@
++"""
++When the code is newer than the database, the API should say so, not return a bare 500.
++"""
++
++import json
++import types
++
++import pytest
++from sqlalchemy.exc import ProgrammingError
++
++from app.core.exceptions import STALE_DATABASE_MESSAGE, database_error_handler
++
++
++def _request():
++    return types.SimpleNamespace(
++        method="POST", url=types.SimpleNamespace(path="/api/users/login")
++    )
++
++
++@pytest.mark.asyncio
++async def test_missing_column_explains_the_database_needs_an_update():
++    exc = ProgrammingError(
++        "SELECT users.role FROM users", {}, Exception("column users.role does not exist")
++    )
++    resp = await database_error_handler(_request(), exc)
++    assert resp.status_code == 503
++    detail = json.loads(resp.body)["detail"]
++    assert detail == STALE_DATABASE_MESSAGE
++    assert "docker compose restart api" in detail
++
++
++@pytest.mark.asyncio
++async def test_missing_table_gets_the_same_message():
++    exc = ProgrammingError(
++        "SELECT * FROM staff_tasks", {}, Exception('relation "staff_tasks" does not exist')
++    )
++    resp = await database_error_handler(_request(), exc)
++    assert resp.status_code == 503
++    assert json.loads(resp.body)["detail"] == STALE_DATABASE_MESSAGE
++
++
++@pytest.mark.asyncio
++async def test_other_database_errors_stay_a_plain_500():
++    exc = ProgrammingError("SELEC 1", {}, Exception('syntax error at or near "SELEC"'))
++    resp = await database_error_handler(_request(), exc)
++    assert resp.status_code == 500
++    assert json.loads(resp.body)["detail"] == "Internal server error"
+diff -ruN a/pytests/tests/test_staff_tasks.py b/pytests/tests/test_staff_tasks.py
+--- a/pytests/tests/test_staff_tasks.py	1970-01-01 00:00:00.000000000 +0000
++++ b/pytests/tests/test_staff_tasks.py	2026-10-05 19:30:31.283779031 +0000
+@@ -0,0 +1,339 @@
++"""
++Test Suite — Owner / Staff roles, shared staff tasks and notifications
++======================================================================
++Covers: staff accounts, the separate owner/staff logins, staff being locked out
++of owner endpoints, assigning an order, the shared staff dashboard, finishing an
++order (ready for dispatch), notifications for both sides, and the emails queued.
++"""
++
++import random
++
++import pytest
++import pytest_asyncio
++from httpx import AsyncClient
++
++
++# ── Helpers / fixtures ───────────────────────────────────────────────────
++
++def _auth(token: str) -> dict:
++    return {"Authorization": f"Bearer {token}"}
++
++
++async def _make_staff(client: AsyncClient, admin_headers: dict, name: str) -> dict:
++    """Create a staff account through the owner's API and sign in as that staff member."""
++    suffix = random.randint(10000, 99999)
++    username = f"{name}{suffix}"
++    password = "staffpass1"
++    resp = await client.post("/users/", json={
++        "username": username,
++        "email": f"{username}@shop.test",
++        "full_name": f"Staff {name.title()}",
++        "password": password,
++        "role": "staff",
++    }, headers=admin_headers)
++    assert resp.status_code == 201, resp.text
++    user = resp.json()
++
++    login = await client.post("/users/login", json={
++        "username": username, "password": password, "login_as": "staff",
++    })
++    assert login.status_code == 200, login.text
++    return {"user": user, "username": username, "password": password,
++            "headers": _auth(login.json()["access_token"])}
++
++
++@pytest_asyncio.fixture
++async def staff_a(client: AsyncClient, admin_headers: dict) -> dict:
++    return await _make_staff(client, admin_headers, "asha")
++
++
++@pytest_asyncio.fixture
++async def staff_b(client: AsyncClient, admin_headers: dict) -> dict:
++    return await _make_staff(client, admin_headers, "ravi")
++
++
++@pytest_asyncio.fixture
++async def sent_emails(monkeypatch) -> list:
++    """Capture the emails the API queues instead of sending them."""
++    captured: list = []
++
++    async def fake_send(messages):
++        captured.extend(messages)
++
++    monkeypatch.setattr("app.modules.tasks.router.send_emails", fake_send)
++    return captured
++
++
++async def _make_order(client, admin_headers, sample_item, sample_raw_material,
++                      qty: float = 10, per_unit: float = 2) -> dict:
++    """A published BOM (per_unit of the raw material per finished item) + a work order."""
++    bom = await client.post("/production/boms", json={
++        "bom_name": "Staff Flow BOM",
++        "fg_item_id": sample_item["id"],
++        "status": "published",
++        "items": [{"item_id": sample_raw_material["id"], "quantity": per_unit}],
++    }, headers=admin_headers)
++    assert bom.status_code == 200, bom.text
++    wo = await client.post("/production/work-orders", json={
++        "item_id": sample_item["id"], "quantity": qty,
++    }, headers=admin_headers)
++    assert wo.status_code == 200, wo.text
++    return wo.json()
++
++
++async def _stock(client, headers, item_id: int) -> float:
++    resp = await client.get(f"/inventory/items/{item_id}", headers=headers)
++    assert resp.status_code == 200, resp.text
++    return resp.json()["current_stock"]
++
++
++# ── Staff accounts & the two logins ──────────────────────────────────────
++
++@pytest.mark.asyncio
++async def test_staff_account_gets_no_owner_modules(staff_a: dict):
++    assert staff_a["user"]["role"] == "staff"
++    assert staff_a["user"]["module_permissions"] == []
++
++
++@pytest.mark.asyncio
++async def test_owner_account_is_still_owner(client: AsyncClient, admin_headers: dict):
++    me = await client.get("/users/me", headers=admin_headers)
++    assert me.status_code == 200
++    assert me.json()["role"] == "owner"
++
++
++@pytest.mark.asyncio
++async def test_login_must_match_the_login_screen(client: AsyncClient, staff_a: dict):
++    # staff account on the owner login -> refused
++    resp = await client.post("/users/login", json={
++        "username": staff_a["username"], "password": staff_a["password"], "login_as": "owner",
++    })
++    assert resp.status_code == 403
++    assert "staff" in resp.json()["detail"].lower()
++
++    # owner account on the staff login -> refused
++    resp = await client.post("/users/login", json={
++        "username": "admin", "password": "admin123", "login_as": "staff",
++    })
++    assert resp.status_code == 403
++    assert "owner" in resp.json()["detail"].lower()
++
++    # wrong password is still a plain 401
++    resp = await client.post("/users/login", json={
++        "username": "admin", "password": "not-the-password", "login_as": "owner",
++    })
++    assert resp.status_code == 401
++
++    # no login_as (API clients, older callers) -> still works
++    resp = await client.post("/users/login", json={"username": "admin", "password": "admin123"})
++    assert resp.status_code == 200
++
++
++@pytest.mark.asyncio
++async def test_staff_are_locked_out_of_owner_endpoints(client: AsyncClient, staff_a: dict):
++    h = staff_a["headers"]
++    me = await client.get("/users/me", headers=h)
++    assert me.status_code == 200 and me.json()["role"] == "staff"
++
++    for path in ["/inventory/items", "/parties/", "/production/work-orders",
++                 "/sales/orders", "/purchases/orders", "/dispatch/dispatches", "/users/", "/settings/"]:
++        resp = await client.get(path, headers=h)
++        assert resp.status_code == 403, f"{path} should be owner-only, got {resp.status_code}"
++
++
++@pytest.mark.asyncio
++async def test_staff_cannot_assign_or_withdraw_tasks(client: AsyncClient, staff_a: dict):
++    resp = await client.post("/tasks/assign", json={"work_order_id": 1}, headers=staff_a["headers"])
++    assert resp.status_code == 403
++    resp = await client.get("/tasks/", headers=staff_a["headers"])
++    assert resp.status_code == 403
++    resp = await client.post("/tasks/1/cancel", headers=staff_a["headers"])
++    assert resp.status_code == 403
++
++
++# ── Assign -> staff notified -> staff finish -> owner notified ───────────
++
++@pytest.mark.asyncio
++async def test_full_loop_assign_notify_complete_notify(
++    client: AsyncClient, admin_headers: dict, staff_a: dict, staff_b: dict,
++    sample_item: dict, sample_raw_material: dict, sent_emails: list,
++):
++    wo = await _make_order(client, admin_headers, sample_item, sample_raw_material, qty=10, per_unit=2)
++    fg_before = await _stock(client, admin_headers, sample_item["id"])
++    rm_before = await _stock(client, admin_headers, sample_raw_material["id"])
++
++    # 1) Owner assigns the order (work order not started yet — assigning starts it)
++    resp = await client.post("/tasks/assign", json={
++        "work_order_id": wo["id"], "note": "Use the dark varnish",
++    }, headers=admin_headers)
++    assert resp.status_code == 201, resp.text
++    body = resp.json()
++    task = body["task"]
++    assert body["notified_staff"] >= 2
++    assert task["status"] == "assigned"
++    assert task["note"] == "Use the dark varnish"
++    assert task["target_quantity"] == 10
++    assert task["materials"][0]["quantity"] == 20          # 2 per item x 10
++
++    # 2) Every staff member is notified (in-app) and emailed
++    for staff in (staff_a, staff_b):
++        notes = await client.get("/notifications/", headers=staff["headers"])
++        assert notes.status_code == 200
++        latest = notes.json()["notifications"][0]
++        assert latest["type"] == "task_assigned"
++        assert latest["is_read"] is False
++        assert latest["link"] == "/staff"
++        assert "Use the dark varnish" in latest["message"]
++        assert notes.json()["unread_count"] >= 1
++    emailed = {m.to for m in sent_emails}
++    assert staff_a["user"]["email"] in emailed and staff_b["user"]["email"] in emailed
++
++    # 3) Everyone on staff sees the SAME task list
++    dash_a = (await client.get("/staff/tasks", headers=staff_a["headers"])).json()
++    dash_b = (await client.get("/staff/tasks", headers=staff_b["headers"])).json()
++    assert task["id"] in [t["id"] for t in dash_a["todo"]]
++    assert [t["id"] for t in dash_a["todo"]] == [t["id"] for t in dash_b["todo"]]
++
++    # 4) Staff A finishes it (8 of 10 made) — ticks "done / ready for dispatch"
++    sent_emails.clear()
++    resp = await client.post(f"/staff/tasks/{task['id']}/complete", json={
++        "completed_quantity": 8, "note": "2 pieces cracked",
++    }, headers=staff_a["headers"])
++    assert resp.status_code == 200, resp.text
++    done = resp.json()
++    assert done["status"] == "ready_for_dispatch"
++    assert done["completed_quantity"] == 8
++    assert done["completed_by_name"] == staff_a["user"]["full_name"]
++
++    # stock moved exactly like the owner's own "Mark as Complete"
++    assert await _stock(client, admin_headers, sample_item["id"]) == fg_before + 8
++    assert await _stock(client, admin_headers, sample_raw_material["id"]) == rm_before - 20
++
++    # 5) The owner is notified, with a link to the dispatch screen, and emailed
++    owner_notes = await client.get("/notifications/", headers=admin_headers)
++    ready = [n for n in owner_notes.json()["notifications"] if n["type"] == "task_ready_for_dispatch"][0]
++    assert ready["link"].startswith("/app/dispatch/create?")
++    assert "8" in ready["message"] and "ready to dispatch" in ready["message"]
++    assert "2 pieces cracked" in ready["message"]
++    assert any(m.to == "admin@quadstack.local" for m in sent_emails)
++
++    # 6) It moves from "to do" to "done" for every staff member
++    for staff in (staff_a, staff_b):
++        dash = (await client.get("/staff/tasks", headers=staff["headers"])).json()
++        assert task["id"] not in [t["id"] for t in dash["todo"]]
++        assert task["id"] in [t["id"] for t in dash["done"]]
++
++    # 7) Can't finish twice or assign again
++    again = await client.post(f"/staff/tasks/{task['id']}/complete", json={}, headers=staff_b["headers"])
++    assert again.status_code == 409
++    reassign = await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)
++    assert reassign.status_code == 409
++
++    # 8) Notifications can be marked read
++    nid = ready["id"]
++    before = owner_notes.json()["unread_count"]
++    read = await client.post(f"/notifications/{nid}/read", headers=admin_headers)
++    assert read.status_code == 200 and read.json()["unread_count"] == before - 1
++    all_read = await client.post("/notifications/read-all", headers=admin_headers)
++    assert all_read.json()["unread_count"] == 0
++
++
++@pytest.mark.asyncio
++async def test_default_quantity_is_the_full_target(
++    client: AsyncClient, admin_headers: dict, staff_a: dict,
++    sample_item: dict, sample_raw_material: dict,
++):
++    wo = await _make_order(client, admin_headers, sample_item, sample_raw_material, qty=5, per_unit=1)
++    task = (await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)).json()["task"]
++    done = await client.post(f"/staff/tasks/{task['id']}/complete", json={}, headers=staff_a["headers"])
++    assert done.status_code == 200, done.text
++    assert done.json()["completed_quantity"] == 5
++
++
++@pytest.mark.asyncio
++async def test_not_enough_material_is_reported_to_staff(
++    client: AsyncClient, admin_headers: dict, staff_a: dict,
++    sample_item: dict, sample_raw_material: dict,
++):
++    # needs 1000 x 1 = 1000 of a raw material that only has ~500 in stock
++    wo = await _make_order(client, admin_headers, sample_item, sample_raw_material, qty=1000, per_unit=1)
++    task = (await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)).json()["task"]
++    resp = await client.post(f"/staff/tasks/{task['id']}/complete", json={}, headers=staff_a["headers"])
++    assert resp.status_code == 409
++    assert "stock" in resp.json()["detail"].lower()
++    # the task is still waiting, nothing was half-done
++    dash = (await client.get("/staff/tasks", headers=staff_a["headers"])).json()
++    assert task["id"] in [t["id"] for t in dash["todo"]]
++
++
++# ── Withdrawing an order ─────────────────────────────────────────────────
++
++@pytest.mark.asyncio
++async def test_owner_can_withdraw_and_reassign(
++    client: AsyncClient, admin_headers: dict, staff_a: dict,
++    sample_item: dict, sample_raw_material: dict,
++):
++    wo = await _make_order(client, admin_headers, sample_item, sample_raw_material, qty=3, per_unit=1)
++    task = (await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)).json()["task"]
++
++    cancel = await client.post(f"/tasks/{task['id']}/cancel", headers=admin_headers)
++    assert cancel.status_code == 200 and cancel.json()["status"] == "cancelled"
++
++    dash = (await client.get("/staff/tasks", headers=staff_a["headers"])).json()
++    assert task["id"] not in [t["id"] for t in dash["todo"]]
++    blocked = await client.post(f"/staff/tasks/{task['id']}/complete", json={}, headers=staff_a["headers"])
++    assert blocked.status_code == 409
++
++    notes = (await client.get("/notifications/", headers=staff_a["headers"])).json()["notifications"]
++    assert notes[0]["type"] == "task_cancelled"
++
++    again = await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)
++    assert again.status_code == 201
++    assert again.json()["task"]["id"] == task["id"]          # same row, sent out again
++    assert again.json()["task"]["status"] == "assigned"
++
++
++@pytest.mark.asyncio
++async def test_owner_task_list_hides_withdrawn_orders(
++    client: AsyncClient, admin_headers: dict, sample_item: dict, sample_raw_material: dict,
++):
++    wo = await _make_order(client, admin_headers, sample_item, sample_raw_material, qty=2, per_unit=1)
++    task = (await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)).json()["task"]
++    listed = (await client.get("/tasks/", headers=admin_headers)).json()
++    assert task["id"] in [t["id"] for t in listed["tasks"]]
++    await client.post(f"/tasks/{task['id']}/cancel", headers=admin_headers)
++    listed = (await client.get("/tasks/", headers=admin_headers)).json()
++    assert task["id"] not in [t["id"] for t in listed["tasks"]]
++    with_cancelled = (await client.get("/tasks/?include_cancelled=true", headers=admin_headers)).json()
++    assert task["id"] in [t["id"] for t in with_cancelled["tasks"]]
++
++
++# ── Validation ───────────────────────────────────────────────────────────
++
++@pytest.mark.asyncio
++async def test_assign_needs_exactly_one_target(client: AsyncClient, admin_headers: dict):
++    neither = await client.post("/tasks/assign", json={}, headers=admin_headers)
++    assert neither.status_code == 422
++    both = await client.post("/tasks/assign", json={"work_order_id": 1, "process_id": 1}, headers=admin_headers)
++    assert both.status_code == 422
++
++
++@pytest.mark.asyncio
++async def test_assign_unknown_order_is_404(client: AsyncClient, admin_headers: dict):
++    resp = await client.post("/tasks/assign", json={"work_order_id": 99999999}, headers=admin_headers)
++    assert resp.status_code == 404
++
++
++# ── Notifications are private ────────────────────────────────────────────
++
++@pytest.mark.asyncio
++async def test_notifications_are_private_to_each_person(
++    client: AsyncClient, admin_headers: dict, staff_a: dict, staff_b: dict,
++    sample_item: dict, sample_raw_material: dict,
++):
++    wo = await _make_order(client, admin_headers, sample_item, sample_raw_material, qty=2, per_unit=1)
++    await client.post("/tasks/assign", json={"work_order_id": wo["id"]}, headers=admin_headers)
++    a_note = (await client.get("/notifications/", headers=staff_a["headers"])).json()["notifications"][0]
++    # staff B cannot mark staff A's notification as read
++    resp = await client.post(f"/notifications/{a_note['id']}/read", headers=staff_b["headers"])
++    assert resp.status_code == 404
