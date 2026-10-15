@@ -67,3 +67,48 @@ bash deploy/add-client.sh acme 8080 "Acme Corp"
 ```
 
 Then open TCP 8080 in the EC2 security group and visit `http://<server-ip>:8080`. The script prints the generated admin login once. Each client's secrets live in `.env.<slug>` (git-ignored). Budget roughly 600-800 MB RAM per client; on a t3.small expect 2 clients at most.
+
+## Self-serve signup with payment (Razorpay)
+
+`apps/billing` is a small control-plane service. A prospect opens the signup page, pays through Razorpay, and the service automatically:
+
+1. verifies the payment (Checkout signature, plus the webhook as a fallback if the browser closes),
+2. creates their isolated stack with `deploy/add-client.sh` (next free port in `CLIENT_PORT_START`–`CLIENT_PORT_END`, their email as the admin user, no demo data),
+3. waits for the stack's `/api/health`, then
+4. emails them the login URL, username and a generated password.
+
+### One-time setup
+
+1. Make sure the first deploy (section 4) has built the `bomify-api` and `bomify-web` images.
+2. Open TCP **9000** (signup page) and the client port range (**8081-8180** by default) in the EC2 security group, once.
+3. Configure and start it:
+   ```bash
+   cd ~/bomify
+   cp .env.billing.example .env.billing
+   nano .env.billing     # Razorpay keys, SMTP, PUBLIC_HOST, BILLING_ADMIN_TOKEN
+   docker compose -p billing -f docker-compose.billing.yml --env-file .env.billing up -d --build
+   ```
+4. In the Razorpay Dashboard -> Webhooks, add `http://<PUBLIC_HOST>:9000/api/webhooks/razorpay` with events `payment.captured` and `order.paid`, and put the same secret in `RAZORPAY_WEBHOOK_SECRET`.
+5. Visit `http://<PUBLIC_HOST>:9000` and do a test purchase with `rzp_test_` keys and a Razorpay test card before switching to live keys.
+
+The signup page should be served over HTTPS before you take live payments (put Caddy/certbot in front of port 9000 and use that URL for the webhook).
+
+### Operating it
+
+```bash
+TOKEN=<BILLING_ADMIN_TOKEN>
+# All signups with status (pending / paid / provisioning / active / failed) and any error
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/api/admin/signups
+# Retry a failed one after fixing the cause (e.g. wrong SMTP password); reuses the same stack
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:9000/api/admin/signups/<id>/retry
+docker compose -p billing -f docker-compose.billing.yml logs -f billing
+```
+
+Set `OPS_ALERT_EMAIL` to get an email whenever provisioning fails. The payment is already captured at that point, so act on it.
+
+Notes:
+- The billing container mounts the Docker socket and the repo, which gives it control of the host's Docker. Keep `.env.billing` private and port 9000 limited to the signup page.
+- Client env files (`.env.<slug>`) it creates are owned by root; use `sudo` to read them.
+- Each client still costs ~600-800 MB RAM. Set `MAX_CLIENTS` to what the instance can run; once reached, the signup page refuses new customers *before* taking payment.
+- After Checkout, the server confirms the payment with Razorpay and captures it if it's only authorized, so it works whether or not auto-capture is on.
+- Tests: `cd apps/billing && pip install -r requirements.txt pytest && python -m pytest tests -v`

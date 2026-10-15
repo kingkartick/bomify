@@ -26,6 +26,7 @@ Default seeded admin credentials (development):
 
 - `apps/api`: FastAPI backend, SQLAlchemy, Alembic migrations, Redis-backed features, JWT auth, seed utilities.
 - `apps/web`: React + Vite + TypeScript frontend with Ant Design and Tailwind.
+- `apps/billing`: Signup + Razorpay payment service that auto-provisions a client stack and emails the login (see [DEPLOY_AWS.md](./DEPLOY_AWS.md#self-serve-signup-with-payment-razorpay)).
 - Root workspace: Turborepo monorepo orchestration (`dev`, `build`, `lint`).
 
 ## Available Scripts

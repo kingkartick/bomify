@@ -4,6 +4,8 @@
 # Usage: bash deploy/add-client.sh <slug> <web-port> ["Display Name"] [admin-password]
 # Example: bash deploy/add-client.sh acme 8080 "Acme Corp"
 # New clients start empty (no demo data). For a demo client: SEED_DEMO_DATA=true bash deploy/add-client.sh ...
+# Admin identity can be overridden with ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_FULL_NAME
+# (the billing service uses this to make the paying customer the admin).
 #
 # The first client (.env.prod, port 80) is left untouched. Images are built once
 # (see docker-compose.prod.yml), so this takes seconds. Remember to open <web-port>
@@ -37,10 +39,10 @@ POSTGRES_USER=quadstack
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 POSTGRES_DB=quadstack
 COPILOT_DB_PASSWORD=$(openssl rand -hex 24)
-ADMIN_USERNAME=admin
+ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
 ADMIN_PASSWORD=$ADMIN_PW
-ADMIN_EMAIL=admin@$SLUG.local
-ADMIN_FULL_NAME=System Administrator
+ADMIN_EMAIL=${ADMIN_EMAIL:-admin@$SLUG.local}
+ADMIN_FULL_NAME=${ADMIN_FULL_NAME:-System Administrator}
 SEED_DEMO_DATA=${SEED_DEMO_DATA:-false}
 GROQ_API_KEY=
 EOF
@@ -51,7 +53,7 @@ docker compose -p "$SLUG" -f docker-compose.prod.yml --env-file "$ENV_FILE" up -
 echo
 echo "Client '$NAME' is starting (project: $SLUG)."
 echo "  URL:      http://<server-ip>:$PORT"
-echo "  Login:    admin / $ADMIN_PW"
+echo "  Login:    ${ADMIN_USERNAME:-admin} / $ADMIN_PW"
 echo "  Env file: $ENV_FILE   (keep private)"
 echo "  Open TCP $PORT in the EC2 security group."
 echo "  Status:   docker compose -p $SLUG -f docker-compose.prod.yml --env-file $ENV_FILE ps"

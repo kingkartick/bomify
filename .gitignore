@@ -231,3 +231,4 @@ pgdata/
 .env.*
 !.env.example
 !.env.prod.example
+!.env.billing.example

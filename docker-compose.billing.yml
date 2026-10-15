@@ -1,0 +1,28 @@
+# Billing / signup service: public payment page that auto-provisions client stacks.
+# Usage: docker compose -p billing -f docker-compose.billing.yml --env-file .env.billing up -d --build
+#
+# It creates client stacks with deploy/add-client.sh through the host's Docker socket,
+# so the repo is mounted at /srv/bomify and the bomify-api / bomify-web images must
+# already be built (see DEPLOY_AWS.md).
+services:
+  billing:
+    build: ./apps/billing
+    image: bomify-billing
+    restart: unless-stopped
+    ports:
+      - "${BILLING_PORT:-9000}:9000"
+    env_file: .env.billing
+    environment:
+      BILLING_DATABASE_URL: sqlite:////data/billing.db
+      DEPLOY_DIR: /srv/bomify
+      HEALTHCHECK_HOST: host.docker.internal
+    extra_hosts:
+      # Lets the provisioner health-check new client stacks on their host ports
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/srv/bomify
+      - billing-data:/data
+
+volumes:
+  billing-data:
