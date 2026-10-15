@@ -55,9 +55,6 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str = "admin@quadstack.local"
     ADMIN_FULL_NAME: str = "System Administrator"
 
-    # Demo BOM + dummy ERP rows; set false for real client deployments
-    SEED_DEMO_DATA: bool = True
-
     # -------------------------------------------------------
     # Copilot — LangGraph Agent
     # -------------------------------------------------------

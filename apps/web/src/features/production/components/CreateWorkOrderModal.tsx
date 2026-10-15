@@ -1,15 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Modal, Form, Select, InputNumber, Button, message, DatePicker, Typography, Tag,
+  Modal, Form, Select, InputNumber, Button, message, DatePicker, Typography, Tag, AutoComplete,
 } from "antd";
 import { FileTextOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { workOrderApi, bomApi, BOM } from "@/features/production/api";
-import { fetchParties, Party } from "@/features/parties/api/parties";
+import { fetchParties, createParty, Party } from "@/features/parties/api/parties";
 
 const { Text } = Typography;
 
 const ORDER_TYPES = ["Standard", "Rush", "Scheduled", "Rework", "Sample"];
+
+// Buyer names are compared ignoring case and extra spaces, so "acme  ltd" finds "Acme Ltd".
+const cleanName = (s: string) => s.trim().replace(/\s+/g, " ");
+const sameName = (a: string, b: string) => cleanName(a).toLowerCase() === cleanName(b).toLowerCase();
 
 interface Props {
   open: boolean;
@@ -34,15 +38,56 @@ export default function CreateWorkOrderModal({ open, onClose, onSuccess }: Props
       setBoms(res.boms);
     }).catch(() => {});
 
-    fetchParties("customer", undefined, 0, 200).then(res => {
+    // The server allows at most 100 per request. Asking for more (this used to ask for 200)
+    // is rejected, which left the buyer list empty.
+    fetchParties("customer", undefined, 0, 100).then(res => {
       setBuyers(res.parties);
-    }).catch(() => {});
+    }).catch(() => {
+      message.warning("Could not load the buyer list. You can still type a buyer name.");
+    });
   }, [open, form]);
+
+  // Buyer names for the dropdown: one entry per name, A to Z.
+  const buyerOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const p of buyers) {
+      const name = cleanName(p.name);
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+    }
+    return names.sort((a, b) => a.localeCompare(b)).map(name => ({ value: name }));
+  }, [buyers]);
 
   const handleBomSelect = (bomId: number) => {
     const bom = boms.find(b => b.id === bomId) ?? null;
     setSelectedBom(bom);
     if (bom) form.setFieldValue("item_id", bom.fg_item_id);
+  };
+
+  // Turns what is in the Buyer box into a buyer id: the existing buyer if the name matches one,
+  // otherwise a new buyer (saved as a customer, so it is in the list next time).
+  const resolveBuyerId = async (raw: unknown): Promise<number | undefined> => {
+    const name = typeof raw === "string" ? cleanName(raw) : "";
+    if (!name) return undefined;
+
+    const loaded = buyers.find(p => sameName(p.name, name));
+    if (loaded) return loaded.id;
+
+    // Not in the list we loaded (e.g. it failed to load): ask the server before adding a duplicate.
+    try {
+      const found = await fetchParties("customer", name, 0, 100);
+      const match = found.parties.find(p => sameName(p.name, name));
+      if (match) return match.id;
+    } catch {
+      // Could not check - fall through and add it as a new buyer.
+    }
+
+    const created = await createParty({ party_type: "customer", name });
+    setBuyers(prev => [created, ...prev]);
+    return created.id;
   };
 
   const handleSave = async () => {
@@ -55,10 +100,18 @@ export default function CreateWorkOrderModal({ open, onClose, onSuccess }: Props
 
     setSaving(true);
     try {
+      let buyerId: number | undefined;
+      try {
+        buyerId = await resolveBuyerId(values.buyer_name);
+      } catch {
+        message.error("Could not save the new buyer. Please try again.");
+        return;
+      }
+
       await workOrderApi.create({
         item_id: values.item_id as number,
         quantity: values.quantity as number,
-        buyer_id: values.buyer_id as number | undefined,
+        buyer_id: buyerId,
         order_type: values.order_type as string | undefined,
         document_date: values.document_date
           ? (values.document_date as dayjs.Dayjs).toISOString()
@@ -172,16 +225,20 @@ export default function CreateWorkOrderModal({ open, onClose, onSuccess }: Props
           />
         </Form.Item>
 
-        <Form.Item label="Buyer" name="buyer_id">
-          <Select
-            showSearch
+        <Form.Item
+          label="Buyer"
+          name="buyer_name"
+          extra="Pick a buyer from the list, or type a new name to add one."
+          rules={[{ max: 200, message: "Buyer name can be at most 200 characters" }]}
+        >
+          <AutoComplete
             allowClear
-            placeholder="Select buyer (optional)"
-            optionFilterProp="label"
-            options={buyers.map(p => ({
-              value: p.id,
-              label: p.name,
-            }))}
+            style={{ width: "100%" }}
+            placeholder="Select or type buyer name (optional)"
+            options={buyerOptions}
+            filterOption={(input, option) =>
+              String(option?.value ?? "").toLowerCase().includes(input.trim().toLowerCase())
+            }
           />
         </Form.Item>
 
