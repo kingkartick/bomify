@@ -65,16 +65,9 @@ DEFAULT_SETTINGS: list[tuple[str, str, Any, str]] = [
     ("workflow", "dispatch_approval_required", False, "Require approval before dispatching"),
     ("workflow", "auto_confirm_orders", False, "Automatically confirm orders on creation"),
 
-    # Email & Notifications
-    ("notifications", "email_on_order_create", False, "Send email when a new order is created"),
-    ("notifications", "email_on_dispatch", False, "Send email on dispatch shipment"),
+    # Notifications
     ("notifications", "low_stock_alert", True, "Enable low stock alerts"),
     ("notifications", "low_stock_threshold", 10, "Alert when stock falls below this quantity"),
-    ("notifications", "smtp_host", "", "SMTP mail server hostname"),
-    ("notifications", "smtp_port", 587, "SMTP mail server port"),
-    ("notifications", "smtp_user", "", "SMTP username / email"),
-    ("notifications", "smtp_password", "", "SMTP password"),
-    ("notifications", "notification_email", "", "Email to receive system notifications"),
 
     # System / General
     ("system", "date_format", "DD/MM/YYYY", "Display date format across the app"),

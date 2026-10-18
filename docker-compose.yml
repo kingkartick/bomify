@@ -27,6 +27,8 @@ services:
 
   api:
     build: ./apps/api
+    # Separate tag from the production bomify-api image used by client stacks
+    image: bomify-dev-api
     ports:
       - "8000:8000"
     environment:
@@ -66,6 +68,8 @@ services:
 
   web:
     build: ./apps/web
+    # Separate tag from the production bomify-web image used by client stacks
+    image: bomify-dev-web
     ports:
       - "5173:5173"
     environment:

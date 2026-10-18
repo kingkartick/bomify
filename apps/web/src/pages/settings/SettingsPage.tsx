@@ -21,7 +21,7 @@ import {
     Hash,
     Receipt,
     Users,
-    Mail,
+    Bell,
     GitBranch,
     Monitor,
     Save,
@@ -91,9 +91,9 @@ const SECTIONS: SettingsSection[] = [
     },
     {
         key: "notifications",
-        label: "Email & Notifications",
-        icon: <Mail size={20} />,
-        description: "SMTP, alerts & notification rules",
+        label: "Notifications",
+        icon: <Bell size={20} />,
+        description: "Low stock alerts",
         color: "#ef4444",
     },
     {
@@ -431,37 +431,11 @@ export default function SettingsPage() {
     const renderNotificationsSection = () => (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
             <SectionHeader
-                title="Email & Notifications"
-                subtitle="Configure SMTP mail server for outgoing emails and system notification preferences."
+                title="Notifications"
+                subtitle="Configure low stock alerts."
                 color="#ef4444"
             />
-            <Title level={5} style={{ margin: 0, color: "#374151", fontWeight: 600 }}>
-                SMTP Mail Server
-            </Title>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-                <FormField name="notifications__smtp_host" label="SMTP Host">
-                    <Input placeholder="smtp.gmail.com" size="large" />
-                </FormField>
-                <FormField name="notifications__smtp_port" label="SMTP Port">
-                    <InputNumber min={1} max={65535} size="large" style={{ width: "100%" }} />
-                </FormField>
-                <FormField name="notifications__smtp_user" label="SMTP Username">
-                    <Input placeholder="noreply@company.com" size="large" />
-                </FormField>
-                <FormField name="notifications__smtp_password" label="SMTP Password">
-                    <Input.Password placeholder="••••••••" size="large" />
-                </FormField>
-                <FormField name="notifications__notification_email" label="Notification Recipient Email">
-                    <Input placeholder="admin@company.com" size="large" />
-                </FormField>
-            </div>
-            <Divider style={{ margin: "8px 0" }} />
-            <Title level={5} style={{ margin: 0, color: "#374151", fontWeight: 600 }}>
-                Notification Rules
-            </Title>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                <ToggleCard name="notifications__email_on_order_create" label="Email on New Order" desc="Send notification when an order is created" />
-                <ToggleCard name="notifications__email_on_dispatch" label="Email on Dispatch" desc="Notify when items are shipped" />
                 <ToggleCard name="notifications__low_stock_alert" label="Low Stock Alert" desc="Alert when stock falls below threshold" />
                 <FormField name="notifications__low_stock_threshold" label="Low Stock Threshold (qty)">
                     <InputNumber min={0} size="large" style={{ width: "100%" }} />
