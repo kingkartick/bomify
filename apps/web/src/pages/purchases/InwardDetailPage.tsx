@@ -1,4 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button, Tag, Space, Typography, Spin, Divider } from 'antd';
 import { message } from '@/lib/antdHelper';
@@ -16,6 +18,7 @@ export default function InwardDetailPage() {
     const { id, grnId } = useParams<{ id: string; grnId: string }>();
     const navigate = useNavigate();
     const currentUser = getUser();
+    const { profile: company } = useCompanyProfile();
 
     const [po, setPo] = useState<PurchaseOrder | null>(null);
     const [grn, setGrn] = useState<GRN | null>(null);
@@ -116,8 +119,8 @@ export default function InwardDetailPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', marginBottom: 28 }}>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Goods Received By</Text>
-                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{currentUser?.full_name || currentUser?.username || 'Checking'}</Text>
-                        <div className="text-xs text-gray-500 leading-5">Main Address,<br/>Mumbai (Maharashtra)<br/>India - 400001</div>
+                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name || currentUser?.full_name || ''}</Text>
+                        <div className="text-xs text-gray-500 leading-5"><CompanyAddressLines address={company.address} /></div>
                     </div>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Goods Sent By</Text>
@@ -132,8 +135,8 @@ export default function InwardDetailPage() {
                     </div>
                     <div style={{ padding: 20, background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Shipped To</Text>
-                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>Main</Text>
-                        <div className="text-xs text-gray-500 leading-5">Main Address,<br/>Mumbai (Maharashtra)<br/>India - 400001</div>
+                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name}</Text>
+                        <div className="text-xs text-gray-500 leading-5"><CompanyAddressLines address={company.address} /></div>
                     </div>
                 </div>
 

@@ -848,7 +848,7 @@ export default function PartyDetailView() {
                         Modal.info({
                             title: "Help & Support",
                             content:
-                                "For assistance, please email support@quadstack.com or call +1-800-QUADSTACK.",
+                                "For assistance, please contact your administrator.",
                             centered: true,
                             okText: "Got it",
                         });

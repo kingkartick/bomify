@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.modules.users.dependencies import require_admin
+from app.modules.users.dependencies import get_current_user, require_admin
 from app.modules.users.models import User
 from app.modules.settings.schemas import (
     SettingResponse,
@@ -46,6 +46,15 @@ async def get_all_settings_full(
             SettingResponse.model_validate(r) for r in rows
         ]
     }
+
+
+@router.get("/company-profile")
+async def get_company_profile(
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Company name, GSTIN and address for document headers (any signed-in user)."""
+    return await services.get_company_profile(db)
 
 
 @router.get("/{category}")

@@ -1,4 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     Button, Tag, Space, Typography, message, Spin, Tooltip, Divider,
@@ -68,6 +70,7 @@ export default function SalesOrderDetailPage() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const currentUser = getUser();
+    const { profile: company } = useCompanyProfile();
 
     const [so, setSo] = useState<SalesOrder | null>(null);
     const [loading, setLoading] = useState(true);
@@ -335,11 +338,15 @@ export default function SalesOrderDetailPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', marginBottom: 28 }}>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Seller Details</Text>
-                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{currentUser?.full_name || currentUser?.username || 'Company'}</Text>
+                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name || currentUser?.full_name || ''}</Text>
                         <div className="text-xs text-gray-500 leading-5">
-                            {so.billing_address?.address || 'Main Address,'}<br />
-                            {so.billing_address?.city || 'Mumbai'} ({so.billing_address?.state || 'Maharashtra'})<br />
-                            India - {so.billing_address?.pincode || '400001'}
+                            {so.billing_address?.address ? (
+                                <>
+                                    {so.billing_address.address}<br />
+                                    {so.billing_address.city} ({so.billing_address.state})<br />
+                                    India - {so.billing_address.pincode}
+                                </>
+                            ) : <CompanyAddressLines address={company.address} />}
                         </div>
                     </div>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
@@ -499,7 +506,7 @@ export default function SalesOrderDetailPage() {
                         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                             <div style={{ textAlign: 'center', minWidth: 220 }}>
                                 <Text style={{ color: '#9ca3af', display: 'block', marginBottom: so.signature_data?.image_base64 ? 8 : 60, fontSize: 13 }}>
-                                    For {so.signature_data?.signer_name || currentUser?.full_name || 'Company'}
+                                    For {so.signature_data?.signer_name || company.name || currentUser?.full_name || ''}
                                 </Text>
                                 {so.signature_data?.image_base64 && (
                                     <div style={{ margin: '8px 0' }}>

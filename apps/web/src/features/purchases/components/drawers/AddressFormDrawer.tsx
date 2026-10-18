@@ -20,7 +20,7 @@ export default function AddressFormDrawer({ open, onClose, initialData, onSave }
         form.setFieldsValue(initialData);
       } else {
         form.resetFields();
-        form.setFieldsValue({ country: 'India', state: 'Maharashtra', gstinType: 'Regular' });
+        form.setFieldsValue({ country: 'India', gstinType: 'Regular' });
       }
     }
   }, [open, initialData, form]);

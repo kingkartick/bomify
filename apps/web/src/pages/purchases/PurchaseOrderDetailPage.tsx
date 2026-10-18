@@ -1,4 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { Button, Tag, Space, Typography, Spin, Tooltip, Divider, Input, InputNumber, Select, DatePicker, Modal } from 'antd';
 import { message } from '@/lib/antdHelper';
@@ -53,6 +55,7 @@ export default function PurchaseOrderDetailPage() {
     const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
     const [supplier, setSupplier] = useState<Party | null>(null);
     const currentUser = getUser();
+    const { profile: company } = useCompanyProfile();
 
     // Edit mode state
     const [isEditing, setIsEditing] = useState(false);
@@ -424,10 +427,10 @@ export default function PurchaseOrderDetailPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', marginBottom: 28 }}>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Name and Address of Buyer</Text>
-                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{currentUser?.full_name || currentUser?.username || 'Checking'}</Text>
-                        <div className="text-xs text-gray-500 leading-5">Main Address,<br/>Mumbai (Maharashtra-27)<br/>India - 400001</div>
+                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name || currentUser?.full_name || ''}</Text>
+                        <div className="text-xs text-gray-500 leading-5"><CompanyAddressLines address={company.address} /></div>
                         <Divider style={{ margin: '10px 0' }} />
-                        <div className="text-xs"><strong className="text-gray-600">Place of Supply:</strong> <span className="text-gray-500">Mumbai, Maharashtra (27)</span></div>
+                        <div className="text-xs"><strong className="text-gray-600">Place of Supply:</strong> <span className="text-gray-500">{[company.address.city, company.address.state].filter(Boolean).join(", ") || "N/A"}</span></div>
                     </div>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Name and Address of Supplier</Text>
@@ -438,8 +441,8 @@ export default function PurchaseOrderDetailPage() {
                     </div>
                     <div style={{ padding: 20, background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Shipping Details</Text>
-                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>Main</Text>
-                        <div className="text-xs text-gray-500 leading-5">Main Address,<br/>Mumbai (Maharashtra)<br/>India - 400001</div>
+                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name}</Text>
+                        <div className="text-xs text-gray-500 leading-5"><CompanyAddressLines address={company.address} /></div>
                     </div>
                 </div>
 
@@ -650,7 +653,7 @@ export default function PurchaseOrderDetailPage() {
                 <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                     <div style={{ textAlign: 'center', minWidth: 220 }}>
                         <Text style={{ color: '#9ca3af', display: 'block', marginBottom: po.signature_data?.image_base64 ? 8 : 60, fontSize: 13 }}>
-                            For {po.signature_data?.signer_name || currentUser?.full_name || 'Checking'}
+                            For {po.signature_data?.signer_name || company.name || currentUser?.full_name || ''}
                         </Text>
                         {po.signature_data?.image_base64 && (
                             <div style={{ margin: '8px 0' }}>

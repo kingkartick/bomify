@@ -41,6 +41,7 @@ import {
     Inbox,
 } from "lucide-react";
 import { settingsApi, SettingsGrouped, SettingUpdatePayload } from "@/features/settings/api";
+import { invalidateCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
 
 const { Title, Text } = Typography;
 
@@ -172,6 +173,7 @@ export default function SettingsPage() {
             }
 
             await settingsApi.bulkUpdate(updates);
+            invalidateCompanyProfile();
             message.success(`Saved ${updates.length} setting${updates.length > 1 ? "s" : ""} successfully`);
             await loadSettings();
         } catch (err) {
@@ -209,6 +211,30 @@ export default function SettingsPage() {
                 </FormField>
                 <FormField name="company__pan" label="PAN">
                     <Input placeholder="AAAAA0000A" size="large" style={{ fontFamily: "monospace" }} />
+                </FormField>
+            </div>
+            <Divider style={{ margin: "8px 0" }} />
+            <Title level={5} style={{ margin: 0, color: "#374151", fontWeight: 600 }}>
+                Registered Address
+            </Title>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+                <FormField name={["company__address", "line1"]} label="Address Line 1">
+                    <Input placeholder="Building, street" size="large" />
+                </FormField>
+                <FormField name={["company__address", "line2"]} label="Address Line 2">
+                    <Input placeholder="Area, landmark" size="large" />
+                </FormField>
+                <FormField name={["company__address", "city"]} label="City">
+                    <Input size="large" />
+                </FormField>
+                <FormField name={["company__address", "state"]} label="State">
+                    <Input size="large" />
+                </FormField>
+                <FormField name={["company__address", "pincode"]} label="PIN Code">
+                    <Input size="large" />
+                </FormField>
+                <FormField name={["company__address", "country"]} label="Country">
+                    <Input size="large" />
                 </FormField>
             </div>
             <Divider style={{ margin: "8px 0" }} />
@@ -758,7 +784,7 @@ function SectionHeader({ title, subtitle, color }: { title: string; subtitle: st
 }
 
 function FormField({ name, label, children, required, compact }: {
-    name: string;
+    name: string | string[];
     label: string;
     children: React.ReactNode;
     required?: boolean;

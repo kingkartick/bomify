@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { Form, Input, Button, DatePicker, Select, Typography, Table, Space, Divider, Row, Col, Tabs, InputNumber, message, Tag, Card } from "antd";
 import { PlusOutlined, DeleteOutlined, DownloadOutlined, UploadOutlined, LeftOutlined, CloseOutlined, SettingOutlined, EditOutlined } from "@ant-design/icons";
 import DocumentTabsSection, { EMPTY_TABS_DATA, DocumentTabsData } from '@/components/shared/DocumentTabsSection';
@@ -56,9 +58,9 @@ export default function CreateOrderConfirmationPage() {
     const [isBuyerDrawerOpen, setIsBuyerDrawerOpen] = useState(false);
     const [isDeliveryLocationDrawerOpen, setIsDeliveryLocationDrawerOpen] = useState(false);
     const [isUserAddressDrawerOpen, setIsUserAddressDrawerOpen] = useState(false);
-    const [buyerDetails, setBuyerDetails] = useLocalStorage<BuyerDetails>('oc_buyer_details', {});
-    const [userAddress, setUserAddress] = useLocalStorage<any>('oc_user_address', { address1: 'Main Address,', city: 'Mumbai', state: 'Maharashtra', pincode: '400001', country: 'India' });
-    const [deliveryLocation, setDeliveryLocation] = useLocalStorage<any>('oc_delivery_location', { locationName: 'Main', address1: 'Main Address,', city: 'Mumbai', state: 'Maharashtra', pincode: '400001', country: 'India' });
+    const [buyerDetails, setBuyerDetails] = useLocalStorage<BuyerDetails>('oc_buyer_details_v2', {});
+    const [userAddress, setUserAddress] = useLocalStorage<any>('oc_user_address_v2', {});
+    const [deliveryLocation, setDeliveryLocation] = useLocalStorage<any>('oc_delivery_location_v2', {});
     const [placeOfSupplySource, setPlaceOfSupplySource] = useState<'company' | 'buyer' | 'delivery'>('delivery');
     
     const [rcmEnabled, setRcmEnabled] = useState(false);
@@ -66,11 +68,22 @@ export default function CreateOrderConfirmationPage() {
     const [documentTabsData, setDocumentTabsData] = useState<DocumentTabsData>(EMPTY_TABS_DATA);
 
     const currentUser = getUser();
+    const { profile: company, loaded: companyLoaded } = useCompanyProfile();
+    // Start from Settings → Company Profile; edits made on the document are kept
     useEffect(() => {
-        if (currentUser && !buyerDetails.companyName) {
-            setBuyerDetails({ companyName: currentUser.full_name || currentUser.username || "System Administrator", gstin: currentUser.id ? `27AADCB2230M1Z${currentUser.id}` : '27AADCB2230M1Z1', address: currentUser.email || "Main Address,", city: "Mumbai", state: "Maharashtra", pincode: "400001" });
+        if (!companyLoaded) return;
+        const a = company.address;
+        if (!buyerDetails.companyName) {
+            setBuyerDetails({ companyName: company.name || currentUser?.full_name || currentUser?.username || '', gstin: company.gstin, address: a.line1, city: a.city, state: a.state, pincode: a.pincode });
         }
-    }, [currentUser, buyerDetails.companyName]);
+        if (!userAddress.address1 && !userAddress.city) {
+            setUserAddress({ address1: a.line1, address2: a.line2, city: a.city, state: a.state, pincode: a.pincode, country: a.country });
+        }
+        if (!deliveryLocation.address1 && !deliveryLocation.city) {
+            setDeliveryLocation({ ...deliveryLocation, locationName: company.name, address1: a.line1, address2: a.line2, city: a.city, state: a.state, pincode: a.pincode, country: a.country, gstin: company.gstin });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [companyLoaded]);
 
     useEffect(() => {
         const loadInitialData = async () => {
@@ -355,10 +368,10 @@ export default function CreateOrderConfirmationPage() {
                     <Col span={8}>
                         <div className="flex flex-col gap-4 h-full">
                             <Card size="small" className="border border-gray-200 shadow-sm rounded-xl overflow-hidden bg-white" title={<div className="text-slate-700 font-semibold text-[13px] uppercase tracking-wide">My Company Details</div>} extra={<Button type="text" size="small" icon={<EditOutlined className="text-slate-400 hover:text-blue-600" />} onClick={() => setIsBuyerDrawerOpen(true)} />} styles={{ header: { backgroundColor: '#fcfcfd', borderBottom: '1px solid #f1f5f9', padding: '12px 16px', minHeight: 'auto' }, body: { padding: '16px' } }}>
-                                <div className="mb-4"><Text strong className="text-[15px] text-slate-800">{buyerDetails.companyName}</Text><div className="text-slate-500 text-[12px] mt-1">GSTIN: <span className="text-slate-700 font-medium">{buyerDetails.gstin}</span></div></div>
+                                <div className="mb-4"><Text strong className="text-[15px] text-slate-800">{buyerDetails.companyName}</Text><div className="text-slate-500 text-[12px] mt-1">GSTIN: <span className="text-slate-700 font-medium">{buyerDetails.gstin || 'N/A'}</span></div></div>
                                 <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 relative group">
                                     <div className="flex justify-between items-start mb-1"><Text className="text-slate-600 text-[13px] font-medium">Billing Address</Text><Button type="text" size="small" className="h-auto p-0 opacity-0 group-hover:opacity-100 transition-opacity" icon={<EditOutlined className="text-slate-400 hover:text-blue-600" />} onClick={() => setIsUserAddressDrawerOpen(true)} /></div>
-                                    <Text className="text-slate-500 text-[12px] leading-relaxed block">{userAddress.address1}<br/>{userAddress.city} ({userAddress.state})<br/>{userAddress.country} - {userAddress.pincode}</Text>
+                                    <Text className="text-slate-500 text-[12px] leading-relaxed block"><CompanyAddressLines address={{ line1: userAddress.address1 || '', line2: userAddress.address2 || '', city: userAddress.city || '', state: userAddress.state || '', pincode: userAddress.pincode || '', country: userAddress.country || '' }} /></Text>
                                 </div>
                                 <div className="flex justify-end mt-4 pt-3 border-t border-slate-100"><Button type="link" size="small" className={`p-0 text-xs font-medium ${placeOfSupplySource === 'company' ? 'text-green-600 font-bold' : 'text-blue-600'}`} onClick={() => setPlaceOfSupplySource('company')}>{placeOfSupplySource === 'company' ? '✓ Place of Supply (Active)' : 'Place of Supply'}</Button></div>
                             </Card>
@@ -399,8 +412,8 @@ export default function CreateOrderConfirmationPage() {
                     <Col span={8}>
                         <div className="flex flex-col gap-4 h-full">
                             <Card size="small" className="border border-gray-200 shadow-sm rounded-xl overflow-hidden bg-white" title={<div className="text-slate-700 font-semibold text-[13px] uppercase tracking-wide">Delivery Location</div>} extra={<Button type="text" size="small" icon={<EditOutlined className="text-slate-400 hover:text-blue-600"/>} onClick={() => setIsDeliveryLocationDrawerOpen(true)} />} styles={{ header: { backgroundColor: '#fcfcfd', borderBottom: '1px solid #f1f5f9', padding: '12px 16px', minHeight: 'auto' }, body: { padding: '16px' } }}>
-                                <Text strong className="text-[14px] text-slate-800">{deliveryLocation.locationName || 'Main'}</Text>
-                                <Text className="text-slate-500 text-[12px] leading-relaxed block mt-2">{deliveryLocation.address1 || "Main Address,"}<br/>{deliveryLocation.city || "Mumbai"} ({deliveryLocation.state || "Maharashtra"})<br/>{deliveryLocation.country || "India"} - {deliveryLocation.pincode || "400001"}</Text>
+                                <Text strong className="text-[14px] text-slate-800">{deliveryLocation.locationName || company.name}</Text>
+                                <Text className="text-slate-500 text-[12px] leading-relaxed block mt-2"><CompanyAddressLines address={{ line1: deliveryLocation.address1 || '', line2: deliveryLocation.address2 || '', city: deliveryLocation.city || '', state: deliveryLocation.state || '', pincode: deliveryLocation.pincode || '', country: deliveryLocation.country || '' }} /></Text>
                                 <div className="flex justify-between items-center mt-4 pt-3 border-t border-slate-100"><Text className="text-slate-500 text-[12px] font-medium">GSTIN : <span className="text-slate-400">{deliveryLocation.gstin || "Not provided"}</span></Text><Button type="link" size="small" className={`p-0 text-xs font-medium ${placeOfSupplySource === 'delivery' ? 'text-green-600 font-bold' : 'text-blue-600'}`} onClick={() => setPlaceOfSupplySource('delivery')}>{placeOfSupplySource === 'delivery' ? '✓ Place of Supply (Active)' : 'Place of Supply'}</Button></div>
                             </Card>
                             <Card size="small" className="border border-gray-200 shadow-sm rounded-xl overflow-hidden bg-white flex-1" title={<div className="text-slate-700 font-semibold text-[13px] uppercase tracking-wide flex items-center gap-2">Place Of Supply <Tag color={placeOfSupplySource === 'buyer' ? 'blue' : 'green'} className="text-[10px] m-0 border-0">{placeOfSupplySource === 'buyer' ? 'From Buyer' : 'From Delivery'}</Tag></div>} styles={{ header: { backgroundColor: '#fcfcfd', borderBottom: '1px solid #f1f5f9', padding: '12px 16px', minHeight: 'auto' }, body: { padding: '16px' } }}>

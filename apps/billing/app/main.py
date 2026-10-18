@@ -7,6 +7,8 @@ Flow:
      The Razorpay webhook (POST /api/webhooks/razorpay) is the fallback if the browser closes.
   3. Either path marks the signup PAID and starts provisioning in the background:
      client stack is created and health-checked. Status -> ACTIVE.
+     If both are lost (e.g. a network blip on /api/verify while the server is not reachable
+     for webhooks), polling a PENDING signup asks Razorpay for the order's payments.
   4. The page polls GET /api/signups/{public_id} to show progress and, once ACTIVE, shows and
      downloads the login.
 """
@@ -14,6 +16,7 @@ Flow:
 import hmac
 import json
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -123,6 +126,31 @@ def _status_response(s: Signup) -> SignupStatusResponse:
         username=s.admin_username if active else None,
         password=s.pending_password if active else None,
     )
+
+
+# public_id -> last time we asked Razorpay about a pending signup
+_last_reconcile: dict[str, float] = {}
+RECONCILE_INTERVAL_SECONDS = 15
+
+
+def _reconcile_pending(s: Signup, background: BackgroundTasks) -> Signup:
+    """Mark a PENDING signup paid if Razorpay has a captured payment for its order."""
+    now = time.monotonic()
+    if now - _last_reconcile.get(s.public_id, 0) < RECONCILE_INTERVAL_SECONDS:
+        return s
+    _last_reconcile[s.public_id] = now
+    try:
+        for payment in razorpay.fetch_order_payments(s.razorpay_order_id):
+            if payment.get("status") == "authorized":
+                payment = razorpay.capture_payment(payment["id"], s.amount, s.currency)
+            if payment.get("status") == "captured" and payment.get("amount") == s.amount:
+                log.info("Reconciled signup %s: payment %s captured", s.id, payment["id"])
+                signup = _mark_paid(s.razorpay_order_id, payment["id"])
+                background.add_task(provisioner.provision, signup.id)
+                return signup
+    except httpx.HTTPError as exc:
+        log.warning("Razorpay reconcile for signup %s failed: %s", s.id, exc)
+    return s
 
 
 def require_billing_admin(authorization: str = Header("")) -> None:
@@ -266,11 +294,13 @@ async def razorpay_webhook(
 
 
 @app.get("/api/signups/{public_id}", response_model=SignupStatusResponse)
-def signup_status(public_id: str):
+def signup_status(public_id: str, background: BackgroundTasks):
     with SessionLocal() as db:
         signup = db.scalar(select(Signup).where(Signup.public_id == public_id))
     if signup is None:
         raise HTTPException(status_code=404, detail="Signup not found")
+    if signup.status == SignupStatus.PENDING:
+        signup = _reconcile_pending(signup, background)
     return _status_response(signup)
 
 

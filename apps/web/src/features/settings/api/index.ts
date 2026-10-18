@@ -17,6 +17,22 @@ export interface SettingsGrouped {
     };
 }
 
+export interface CompanyAddress {
+    line1: string;
+    line2: string;
+    city: string;
+    state: string;
+    pincode: string;
+    country: string;
+}
+
+/** What documents print as "our company" (Settings → Company Profile) */
+export interface CompanyProfile {
+    name: string;
+    gstin: string;
+    address: CompanyAddress;
+}
+
 export interface SettingUpdatePayload {
     category: string;
     key: string;
@@ -36,6 +52,12 @@ export const settingsApi = {
     getAllFull: async (): Promise<SettingItem[]> => {
         const response = await api.get<{ settings: SettingItem[] }>("/settings/full");
         return response.data.settings;
+    },
+
+    /** Company name, GSTIN and address (readable by any signed-in user) */
+    getCompanyProfile: async (): Promise<CompanyProfile> => {
+        const response = await api.get<CompanyProfile>("/settings/company-profile");
+        return response.data;
     },
 
     /** Get settings for a specific category */

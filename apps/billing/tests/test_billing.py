@@ -26,6 +26,7 @@ os.environ.update(
 )
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -61,6 +62,9 @@ def env(monkeypatch):
     def fake_fetch_payment(payment_id):
         return dict(payments[payment_id])
 
+    def fake_fetch_order_payments(order_id):
+        return [dict(p) for p in payments.values() if p["order_id"] == order_id]
+
     def fake_capture_payment(payment_id, amount, currency):
         calls["captures"].append(payment_id)
         payments[payment_id]["status"] = "captured"
@@ -72,6 +76,7 @@ def env(monkeypatch):
 
     monkeypatch.setattr(razorpay, "create_order", fake_create_order)
     monkeypatch.setattr(razorpay, "fetch_payment", fake_fetch_payment)
+    monkeypatch.setattr(razorpay, "fetch_order_payments", fake_fetch_order_payments)
     monkeypatch.setattr(razorpay, "capture_payment", fake_capture_payment)
     monkeypatch.setattr(provisioner, "create_stack", fake_create_stack)
     monkeypatch.setattr(provisioner, "wait_until_healthy", lambda port: None)
@@ -156,7 +161,8 @@ def test_full_flow_provisions_and_shows_login(env):
 def test_bad_checkout_signature_rejected(env):
     client, calls = env
     order = create_order(client)
-    assert checkout_success(client, order, secret="wrong", payments=calls["payments"]).status_code == 400
+    # Forged signature with no real payment behind it
+    assert checkout_success(client, order, secret="wrong").status_code == 400
     assert client.get(f"/api/signups/{order['signup_id']}").json()["status"] == "pending"
     assert calls["stacks"] == []
 
@@ -173,6 +179,23 @@ def test_webhook_and_checkout_provision_only_once(env):
     assert webhook(client, {**event, "event": "order.paid",
                             "payload": {**event["payload"], "order": {"entity": {"id": order["order_id"]}}}}
                    ).status_code == 200
+    assert len(calls["stacks"]) == 1
+
+
+def test_lost_verify_is_recovered_by_polling(env, monkeypatch):
+    client, calls = env
+    order = create_order(client)
+
+    def dns_down(payment_id):
+        raise httpx.ConnectError("No address associated with hostname")
+
+    monkeypatch.setattr(razorpay, "fetch_payment", dns_down)
+    assert checkout_success(client, order, payments=calls["payments"]).status_code == 502
+    assert calls["stacks"] == []
+
+    # Razorpay has the captured payment; the page's next status poll picks it up
+    client.get(f"/api/signups/{order['signup_id']}")
+    assert client.get(f"/api/signups/{order['signup_id']}").json()["status"] == "active"
     assert len(calls["stacks"]) == 1
 
 

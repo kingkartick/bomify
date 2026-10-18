@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     Button, Tag, Space, Typography, message, Spin, Tooltip, Divider,
@@ -37,6 +39,7 @@ export default function DispatchDetailPage() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const currentUser = getUser();
+    const { profile: company } = useCompanyProfile();
 
     const [dispatch, setDispatch] = useState<DispatchRecord | null>(null);
     const [loading, setLoading] = useState(true);
@@ -300,11 +303,9 @@ export default function DispatchDetailPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', marginBottom: 28 }}>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
                         <Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Seller Details</Text>
-                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{currentUser?.full_name || currentUser?.username || 'Company'}</Text>
+                        <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name || currentUser?.full_name || ''}</Text>
                         <div className="text-xs text-gray-500 leading-5">
-                            Main Address,<br />
-                            Mumbai (Maharashtra)<br />
-                            India
+                            <CompanyAddressLines address={company.address} />
                         </div>
                     </div>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}>
@@ -434,7 +435,7 @@ export default function DispatchDetailPage() {
                 {/* Signature */}
                 <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                     <div style={{ textAlign: 'center', minWidth: 220 }}>
-                        <Text style={{ color: '#9ca3af', display: 'block', marginBottom: 60, fontSize: 13 }}>For {currentUser?.full_name || 'Company'}</Text>
+                        <Text style={{ color: '#9ca3af', display: 'block', marginBottom: 60, fontSize: 13 }}>For {company.name || currentUser?.full_name || ''}</Text>
                         <div style={{ borderTop: '1px solid #d1d5db', paddingTop: 8 }}><Text style={{ color: '#6b7280', fontSize: 12 }}>Authorised Signatory</Text></div>
                     </div>
                 </div>

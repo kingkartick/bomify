@@ -1,4 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { Button, Tag, Space, Typography, Spin, Tooltip, Divider, Input, InputNumber, Select, DatePicker, Modal } from 'antd';
 import { message } from '@/lib/antdHelper';
@@ -45,6 +47,7 @@ export default function AdhocInvoiceDetailPage() {
     const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
     const [buyer, setBuyer] = useState<Party | null>(null);
     const currentUser = getUser();
+    const { profile: company } = useCompanyProfile();
     const [isEditing, setIsEditing] = useState(false);
     const [editItems, setEditItems] = useState<EditableItem[]>([]);
     const [editNotes, setEditNotes] = useState('');
@@ -153,9 +156,9 @@ export default function AdhocInvoiceDetailPage() {
             <div className="bg-white rounded-lg border border-gray-200" style={{ padding: '32px 40px' }}>
                 <Title level={3} style={{ textAlign: 'center', marginBottom: 28 }}>Adhoc Invoice</Title>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', marginBottom: 28 }}>
-                    <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}><Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase' }}>Company Details</Text><Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{currentUser?.full_name || 'Company'}</Text><div className="text-xs text-gray-500">Main Address,<br/>Mumbai (Maharashtra-27)<br/>India - 400001</div></div>
+                    <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}><Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase' }}>Company Details</Text><Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name || currentUser?.full_name || ''}</Text><div className="text-xs text-gray-500"><CompanyAddressLines address={company.address} /></div></div>
                     <div style={{ padding: 20, borderRight: '1px solid #e5e7eb', background: '#fafbfc' }}><Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase' }}>Buyer Details</Text><Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{buyer?.name || buyerNameParam || 'Buyer'}</Text><div className="text-xs text-gray-500">{buyer?.address1 || 'Address'}<br/>{buyer?.city}, {buyer?.state}<br/>{buyer?.country || 'India'} - {buyer?.pincode}</div><Divider style={{ margin: '10px 0' }} /><div className="text-xs"><strong>GSTIN:</strong> {buyer?.gstin || 'N/A'}</div></div>
-                    <div style={{ padding: 20, background: '#fafbfc' }}><Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase' }}>Delivery Location</Text><Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>Main</Text><div className="text-xs text-gray-500">Main Address,<br/>Mumbai (Maharashtra)<br/>India - 400001</div></div>
+                    <div style={{ padding: 20, background: '#fafbfc' }}><Text strong style={{ fontSize: 11, display: 'block', marginBottom: 10, color: '#6b7280', textTransform: 'uppercase' }}>Delivery Location</Text><Text strong style={{ fontSize: 14, display: 'block', marginBottom: 6 }}>{company.name}</Text><div className="text-xs text-gray-500"><CompanyAddressLines address={company.address} /></div></div>
                 </div>
                 <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', marginBottom: 28 }}>
                     <div style={{ textAlign: 'center', background: '#f3f4f6', padding: 10, borderBottom: '1px solid #e5e7eb' }}><Text strong style={{ fontSize: 13 }}>Adhoc Invoice Details</Text></div>
@@ -193,7 +196,7 @@ export default function AdhocInvoiceDetailPage() {
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 28 }}><div style={{ width: 350, background: '#e6f4ff', borderRadius: 8, border: '1px solid #91caff', padding: '16px 20px' }}><div className="flex justify-between py-2"><Text style={{ color: '#6b7280' }}>Subtotal:</Text><Text strong>{formatCurrency(editTotals.totalBeforeTax)}</Text></div><div className="flex justify-between py-2"><Text style={{ color: '#6b7280' }}>Tax:</Text><Text strong>{formatCurrency(editTotals.totalTax)}</Text></div><Divider style={{ margin: '8px 0' }} /><div className="flex justify-between py-2"><Text strong style={{ fontSize: 15 }}>New Total:</Text><Text strong style={{ fontSize: 15, color: '#1677ff' }}>{formatCurrency(editTotals.grandTotal)}</Text></div></div></div>
                 </>)}
                 <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 20, marginBottom: 28, background: '#fafbfc' }}><Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>Terms And Conditions:</Text><Text style={{ color: '#6b7280', fontSize: 13 }}>This is a computer generated document</Text></div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end' }}><div style={{ textAlign: 'center', minWidth: 220 }}><Text style={{ color: '#9ca3af', display: 'block', marginBottom: 60, fontSize: 13 }}>For {currentUser?.full_name || 'Company'}</Text><div style={{ borderTop: '1px solid #d1d5db', paddingTop: 8 }}><Text style={{ color: '#6b7280', fontSize: 12 }}>Authorised Signatory</Text></div></div></div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}><div style={{ textAlign: 'center', minWidth: 220 }}><Text style={{ color: '#9ca3af', display: 'block', marginBottom: 60, fontSize: 13 }}>For {company.name || currentUser?.full_name || ''}</Text><div style={{ borderTop: '1px solid #d1d5db', paddingTop: 8 }}><Text style={{ color: '#6b7280', fontSize: 12 }}>Authorised Signatory</Text></div></div></div>
             </div>
             {!isEditing && (<div className="flex justify-between items-center mt-6 no-print">
                 <Button icon={<CheckCircleOutlined />} style={{ borderColor: isPaid ? '#d9d9d9' : '#52c41a', color: isPaid ? '#bfbfbf' : '#52c41a', fontWeight: 600, height: 40 }} size="large" onClick={handleMarkPaid} disabled={isPaid}>{isPaid ? 'Paid' : 'Mark As Paid'}</Button>

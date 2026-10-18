@@ -38,6 +38,17 @@ def fetch_payment(payment_id: str) -> dict:
     return resp.json()
 
 
+def fetch_order_payments(order_id: str) -> list[dict]:
+    """All payment attempts made against an order."""
+    resp = httpx.get(
+        f"{settings.RAZORPAY_API_URL}/orders/{order_id}/payments",
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json().get("items", [])
+
+
 def capture_payment(payment_id: str, amount: int, currency: str) -> dict:
     """Capture an authorized payment (needed when auto-capture is off on the account)."""
     resp = httpx.post(

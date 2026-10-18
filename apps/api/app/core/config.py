@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = "admin123"
     ADMIN_EMAIL: str = "admin@quadstack.local"
     ADMIN_FULL_NAME: str = "System Administrator"
+    # Sample BOM, parties and items, for demos only; every workspace starts empty by default
+    SEED_DEMO_DATA: bool = False
 
     # -------------------------------------------------------
     # Copilot — LangGraph Agent

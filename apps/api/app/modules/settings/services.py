@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings as app_settings
 from app.modules.settings.models import Setting
 
 
@@ -16,7 +17,8 @@ from app.modules.settings.models import Setting
 
 DEFAULT_SETTINGS: list[tuple[str, str, Any, str]] = [
     # Company Profile
-    ("company", "company_name", "QuadStack", "Legal entity / company name"),
+    # Filled from CLIENT_NAME (the company name given at signup) when seeded
+    ("company", "company_name", "", "Legal entity / company name"),
     ("company", "company_logo", None, "Company logo (base64 or URL)"),
     ("company", "address", {"line1": "", "line2": "", "city": "", "state": "", "pincode": "", "country": "India"}, "Registered office address"),
     ("company", "gstin", "", "Company GSTIN number"),
@@ -156,6 +158,24 @@ async def bulk_update_settings(
     return results
 
 
+async def get_company_profile(db: AsyncSession) -> dict[str, Any]:
+    """Company name, GSTIN and address as printed on documents."""
+    company = await get_settings_by_category(db, "company")
+    address = company.get("address") or {}
+    return {
+        "name": company.get("company_name") or "",
+        "gstin": company.get("gstin") or "",
+        "address": {
+            "line1": address.get("line1", ""),
+            "line2": address.get("line2", ""),
+            "city": address.get("city", ""),
+            "state": address.get("state", ""),
+            "pincode": address.get("pincode", ""),
+            "country": address.get("country") or "India",
+        },
+    }
+
+
 async def seed_default_settings(db: AsyncSession) -> None:
     """
     Populate default settings if they don't already exist.
@@ -166,6 +186,8 @@ async def seed_default_settings(db: AsyncSession) -> None:
 
     new_count = 0
     for category, key, value, description in DEFAULT_SETTINGS:
+        if (category, key) == ("company", "company_name"):
+            value = app_settings.CLIENT_NAME
         if (category, key) not in existing_keys:
             db.add(Setting(
                 category=category,

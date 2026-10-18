@@ -1,4 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useCompanyProfile } from "@/features/settings/hooks/useCompanyProfile";
+import CompanyAddressLines from "@/features/settings/components/CompanyAddressLines";
 import { useParams, useNavigate } from 'react-router-dom';
 import { Card, Form, Input, DatePicker, Select, Button, Table, Typography, Row, Col, Space, Divider, Tabs, Spin } from 'antd';
 import { message } from '@/lib/antdHelper';
@@ -21,6 +23,7 @@ export default function CreateInwardPage() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const currentUser = getUser();
+    const { profile: company } = useCompanyProfile();
 
     const [form] = Form.useForm();
     const [po, setPo] = useState<PurchaseOrder | null>(null);
@@ -305,15 +308,13 @@ export default function CreateInwardPage() {
                                 styles={{ header: { backgroundColor: '#fcfcfd', borderBottom: '1px solid #f1f5f9', padding: '12px 16px', minHeight: 'auto' }, body: { padding: '16px' } }}
                             >
                                 <div className="mb-4">
-                                    <Text strong className="text-[15px] text-slate-800">{currentUser?.full_name || currentUser?.username || 'System Administrator'}</Text>
-                                    <div className="text-slate-500 text-[12px] mt-1">GSTIN: <span className="text-slate-700 font-medium">—</span></div>
+                                    <Text strong className="text-[15px] text-slate-800">{company.name || currentUser?.full_name || ''}</Text>
+                                    <div className="text-slate-500 text-[12px] mt-1">GSTIN: <span className="text-slate-700 font-medium">{company.gstin || "—"}</span></div>
                                 </div>
                                 <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 relative">
                                     <Text className="text-slate-600 text-[13px] font-medium block mb-1">Billing Address</Text>
                                     <Text className="text-slate-500 text-[12px] leading-relaxed block">
-                                        Main Address,<br/>
-                                        Mumbai (Maharashtra)<br/>
-                                        India - 400001
+                                        <CompanyAddressLines address={company.address} />
                                     </Text>
                                 </div>
                             </Card>
@@ -329,11 +330,9 @@ export default function CreateInwardPage() {
                                 extra={<Button type="text" size="small" icon={<EditOutlined className="text-slate-400 hover:text-blue-600"/>} />} 
                                 styles={{ header: { backgroundColor: '#fcfcfd', borderBottom: '1px solid #f1f5f9', padding: '12px 16px', minHeight: 'auto' }, body: { padding: '16px' } }}
                             >
-                                <Text strong className="text-[14px] text-slate-800">Main</Text>
+                                <Text strong className="text-[14px] text-slate-800">{company.name}</Text>
                                 <Text className="text-slate-500 text-[12px] leading-relaxed block mt-2">
-                                    Main Address,<br/>
-                                    Mumbai (Maharashtra)<br/>
-                                    India - 400001
+                                    <CompanyAddressLines address={company.address} />
                                 </Text>
                                 <div className="mt-4 pt-3 border-t border-slate-100">
                                     <Text className="text-slate-500 text-[12px] font-medium">GSTIN : <span className="text-slate-400">—</span></Text>
