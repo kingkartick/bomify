@@ -6,8 +6,9 @@ Flow:
   2. Razorpay Checkout collects payment; the page posts the result to POST /api/verify.
      The Razorpay webhook (POST /api/webhooks/razorpay) is the fallback if the browser closes.
   3. Either path marks the signup PAID and starts provisioning in the background:
-     client stack is created, health-checked, and the login is emailed. Status -> ACTIVE.
-  4. The page polls GET /api/signups/{public_id} to show progress.
+     client stack is created and health-checked. Status -> ACTIVE.
+  4. The page polls GET /api/signups/{public_id} to show progress and, once ACTIVE, shows and
+     downloads the login.
 """
 
 import hmac
@@ -86,6 +87,8 @@ class SignupStatusResponse(BaseModel):
     status: SignupStatus
     email: str
     app_url: str | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +112,16 @@ def _mark_paid(order_id: str, payment_id: str | None) -> Signup | None:
 
 
 def _status_response(s: Signup) -> SignupStatusResponse:
+    # public_id is a random 128-bit id known only to the payer's browser, so it
+    # doubles as the secret for showing the initial login
+    active = s.status == SignupStatus.ACTIVE
     return SignupStatusResponse(
         signup_id=s.public_id,
         status=s.status,
         email=s.email,
-        app_url=s.app_url if s.status == SignupStatus.ACTIVE else None,
+        app_url=s.app_url if active else None,
+        username=s.admin_username if active else None,
+        password=s.pending_password if active else None,
     )
 
 
@@ -298,7 +306,7 @@ def admin_list_signups():
 
 @app.post("/api/admin/signups/{signup_id}/retry", dependencies=[Depends(require_billing_admin)])
 def admin_retry(signup_id: int, background: BackgroundTasks):
-    """Re-run provisioning for a FAILED signup (e.g. after fixing SMTP settings)."""
+    """Re-run provisioning for a FAILED signup (e.g. after fixing a Docker problem)."""
     with SessionLocal.begin() as db:
         result = db.execute(
             update(Signup)

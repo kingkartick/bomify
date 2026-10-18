@@ -75,7 +75,7 @@ Then open TCP 8080 in the EC2 security group and visit `http://<server-ip>:8080`
 1. verifies the payment (Checkout signature, plus the webhook as a fallback if the browser closes),
 2. creates their isolated stack with `deploy/add-client.sh` (next free port in `CLIENT_PORT_START`–`CLIENT_PORT_END`, their email as the admin user, no demo data),
 3. waits for the stack's `/api/health`, then
-4. emails them the login URL, username and a generated password.
+4. shows the login URL, username and a generated password on the signup page and downloads them as a text file (with a button to download them again).
 
 ### One-time setup
 
@@ -85,7 +85,7 @@ Then open TCP 8080 in the EC2 security group and visit `http://<server-ip>:8080`
    ```bash
    cd ~/bomify
    cp .env.billing.example .env.billing
-   nano .env.billing     # Razorpay keys, SMTP, PUBLIC_HOST, BILLING_ADMIN_TOKEN
+   nano .env.billing     # Razorpay keys, PUBLIC_HOST, BILLING_ADMIN_TOKEN
    docker compose -p billing -f docker-compose.billing.yml --env-file .env.billing up -d --build
    ```
 4. In the Razorpay Dashboard -> Webhooks, add `http://<PUBLIC_HOST>:9000/api/webhooks/razorpay` with events `payment.captured` and `order.paid`, and put the same secret in `RAZORPAY_WEBHOOK_SECRET`.
@@ -99,12 +99,12 @@ The signup page should be served over HTTPS before you take live payments (put C
 TOKEN=<BILLING_ADMIN_TOKEN>
 # All signups with status (pending / paid / provisioning / active / failed) and any error
 curl -H "Authorization: Bearer $TOKEN" http://localhost:9000/api/admin/signups
-# Retry a failed one after fixing the cause (e.g. wrong SMTP password); reuses the same stack
+# Retry a failed one after fixing the cause (e.g. a stack that never became healthy); reuses the same stack
 curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:9000/api/admin/signups/<id>/retry
 docker compose -p billing -f docker-compose.billing.yml logs -f billing
 ```
 
-Set `OPS_ALERT_EMAIL` to get an email whenever provisioning fails. The payment is already captured at that point, so act on it.
+Check the admin list (or the logs) for `failed` signups. The payment is already captured at that point, so act on it: once retried, the customer's open signup page picks up the login automatically.
 
 Notes:
 - The billing container mounts the Docker socket and the repo, which gives it control of the host's Docker. Keep `.env.billing` private and port 9000 limited to the signup page.

@@ -58,16 +58,6 @@ class Settings(BaseSettings):
     PROVISION_TIMEOUT_SECONDS: int = 300
     CLIENT_ADMIN_USERNAME: str = "admin"
 
-    # SMTP for credential emails
-    SMTP_HOST: str = ""
-    SMTP_PORT: int = 587
-    SMTP_USER: str = ""
-    SMTP_PASSWORD: str = ""
-    SMTP_FROM: str = ""
-    SMTP_USE_SSL: bool = False  # True for port 465; otherwise STARTTLS
-    # Operator address alerted when provisioning fails (optional)
-    OPS_ALERT_EMAIL: str = ""
-
     # Bearer token for the /admin endpoints (empty disables them)
     BILLING_ADMIN_TOKEN: str = ""
 

@@ -1,5 +1,5 @@
 """
-Billing service tests — Razorpay is stubbed at the HTTP boundary; Docker and SMTP are stubbed.
+Billing service tests — Razorpay is stubbed at the HTTP boundary; Docker is stubbed.
 
 Run from apps/billing:  python -m pytest tests -v
 """
@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import mailer, main, provisioner, razorpay  # noqa: E402
+from app import main, provisioner, razorpay  # noqa: E402
 from app.db import SessionLocal, Signup, SignupStatus  # noqa: E402
 
 SIGNUP = {
@@ -47,8 +47,8 @@ def sign(secret: str, message: bytes) -> str:
 
 @pytest.fixture()
 def env(monkeypatch):
-    """Stub Razorpay/Docker/SMTP and record what the provisioner did."""
-    calls = {"orders": [], "stacks": [], "emails": [], "alerts": [], "captures": []}
+    """Stub Razorpay/Docker and record what the provisioner did."""
+    calls = {"orders": [], "stacks": [], "captures": []}
     # payment_id -> payment entity as Razorpay would return it; tests may override
     payments = {}
     calls["payments"] = payments
@@ -75,8 +75,6 @@ def env(monkeypatch):
     monkeypatch.setattr(razorpay, "capture_payment", fake_capture_payment)
     monkeypatch.setattr(provisioner, "create_stack", fake_create_stack)
     monkeypatch.setattr(provisioner, "wait_until_healthy", lambda port: None)
-    monkeypatch.setattr(mailer, "send_credentials", lambda **kw: calls["emails"].append(kw))
-    monkeypatch.setattr(mailer, "send_ops_alert", lambda subj, body: calls["alerts"].append(subj))
 
     with TestClient(main.app) as client:
         yield client, calls
@@ -132,7 +130,7 @@ def test_order_rejects_unknown_plan_and_unsafe_text(env):
     assert client.post("/api/orders", json={**SIGNUP, "email": "not-an-email"}).status_code == 422
 
 
-def test_full_flow_provisions_and_emails(env):
+def test_full_flow_provisions_and_shows_login(env):
     client, calls = env
     order = create_order(client)
     assert calls["orders"] == [499900]
@@ -146,15 +144,12 @@ def test_full_flow_provisions_and_emails(env):
     assert status["app_url"] == "http://203.0.113.10:8081"
 
     (slug, port, password), = calls["stacks"]
+    assert (status["username"], status["password"]) == ("admin", password)
     assert (slug, port) == ("acmeindustries", 8081)
-    email, = calls["emails"]
-    assert email["to"] == "ravi@acme.example"
-    assert email["username"] == "admin"
-    assert email["password"] == password and password.isalnum() and len(password) == 14
+    assert password.isalnum() and len(password) == 14
 
     with SessionLocal() as db:
         s = db.query(Signup).one()
-        assert s.pending_password is None  # plaintext not kept after emailing
         assert s.razorpay_payment_id == "pay_1"
 
 
@@ -179,7 +174,6 @@ def test_webhook_and_checkout_provision_only_once(env):
                             "payload": {**event["payload"], "order": {"entity": {"id": order["order_id"]}}}}
                    ).status_code == 200
     assert len(calls["stacks"]) == 1
-    assert len(calls["emails"]) == 1
 
 
 def test_webhook_bad_signature_and_unrelated_events(env):
@@ -204,26 +198,26 @@ def test_slug_and_port_avoid_existing_clients(env):
 def test_failure_is_recorded_and_retry_reuses_stack(env, monkeypatch):
     client, calls = env
 
-    def smtp_down(**kw):
-        raise ConnectionRefusedError("SMTP down")
+    def never_healthy(port):
+        raise TimeoutError("stack never became healthy")
 
-    monkeypatch.setattr(mailer, "send_credentials", smtp_down)
+    monkeypatch.setattr(provisioner, "wait_until_healthy", never_healthy)
     order = create_order(client)
     checkout_success(client, order, payments=calls["payments"])
-    assert client.get(f"/api/signups/{order['signup_id']}").json()["status"] == "failed"
-    assert len(calls["alerts"]) == 1
+    status = client.get(f"/api/signups/{order['signup_id']}").json()
+    assert status["status"] == "failed" and status["password"] is None
 
     admin = {"Authorization": "Bearer ops-token"}
     assert client.get("/api/admin/signups").status_code == 401
     rows = client.get("/api/admin/signups", headers=admin).json()
-    assert "SMTP down" in rows[0]["error"]
+    assert "never became healthy" in rows[0]["error"]
 
-    monkeypatch.setattr(mailer, "send_credentials", lambda **kw: calls["emails"].append(kw))
+    monkeypatch.setattr(provisioner, "wait_until_healthy", lambda port: None)
     assert client.post(f"/api/admin/signups/{rows[0]['id']}/retry", headers=admin).status_code == 200
     assert client.get(f"/api/signups/{order['signup_id']}").json()["status"] == "active"
     # Same slug/port/password as the first attempt, not a second stack
     assert calls["stacks"][0] == calls["stacks"][1]
-    assert calls["emails"][0]["password"] == calls["stacks"][0][2]
+    assert client.get(f"/api/signups/{order['signup_id']}").json()["password"] == calls["stacks"][0][2]
     assert client.post(f"/api/admin/signups/{rows[0]['id']}/retry", headers=admin).status_code == 409
 
 

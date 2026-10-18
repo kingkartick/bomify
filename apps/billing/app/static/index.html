@@ -37,6 +37,11 @@
                border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     a { color: var(--primary); }
+    .creds { text-align: left; margin: 16px 0 4px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 14px; }
+    .creds div { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; }
+    .creds div + div { border-top: 1px solid var(--border); }
+    .creds span { color: var(--muted); }
+    .creds code { font-size: 15px; word-break: break-all; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -51,7 +56,7 @@
       <input id="company_name" name="company_name" required maxlength="100" autocomplete="organization" />
       <label for="contact_name">Your name</label>
       <input id="contact_name" name="contact_name" required maxlength="100" autocomplete="name" />
-      <label for="email">Work email (your login is sent here)</label>
+      <label for="email">Work email</label>
       <input id="email" name="email" type="email" required maxlength="255" autocomplete="email" />
       <label for="email_confirm">Confirm email</label>
       <input id="email_confirm" name="email_confirm" type="email" required maxlength="255" autocomplete="off" onpaste="return false" />
@@ -91,32 +96,73 @@
       return data;
     }
 
-    function showStatus(state, rawEmail, rawUrl) {
-      const email = esc(rawEmail), appUrl = esc(rawUrl);
+    function showStatus(state, rawEmail, rawUrl, rawUser, rawPassword) {
+      const appUrl = esc(rawUrl);
+      const creds = rawPassword
+        ? `<div class="creds"><div><span>Login URL</span><a href="${appUrl}">${appUrl}</a></div>` +
+          `<div><span>Username</span><code>${esc(rawUser)}</code></div>` +
+          `<div><span>Password</span><code>${esc(rawPassword)}</code></div></div>` +
+          `Save these now, then change the password from the Users page after you sign in.` +
+          `<button type="button" id="download-btn">Download login details again</button>`
+        : (appUrl ? `<a href="${appUrl}">Open ${appUrl}</a>` : "");
       $("signup-form").hidden = true;
       $("status").hidden = false;
       const views = {
         pending:      ["spinner", "Confirming payment…", "Please keep this page open."],
         paid:         ["spinner", "Payment received", "We're setting up your workspace. This usually takes a minute or two."],
-        provisioning: ["spinner", "Setting up your workspace", "This usually takes a minute or two. You can close this page; we'll email you when it's ready."],
-        active:       ["ok", "Your workspace is ready", `Your login details were sent to <b>${email}</b>.` + (appUrl ? `<br><a href="${appUrl}">Open ${appUrl}</a>` : "")],
-        failed:       ["err", "Payment received, setup delayed", `Your payment is safe. We hit a problem setting up the workspace and our team has been notified. We'll email <b>${email}</b> as soon as it's ready.`],
+        provisioning: ["spinner", "Setting up your workspace", "This usually takes a minute or two. Keep this page open; your login details will appear here."],
+        active:       ["ok", "Your workspace is ready", `Here are your login details.` + creds],
+        failed:       ["err", "Payment received, setup delayed", `Your payment is safe. We hit a problem setting up the workspace and are fixing it. Keep this page open or come back to it on this browser; your login details will appear here once it's ready.`],
       };
       const [icon, title, text] = views[state] || views.pending;
       $("status-icon").className = icon === "spinner" ? "spinner" : "icon";
       $("status-icon").textContent = icon === "ok" ? "✅" : icon === "err" ? "⚠️" : "";
       $("status-title").textContent = title;
       $("status-text").innerHTML = text;
+      const btn = $("download-btn");
+      if (btn) btn.onclick = () => downloadCredentials(rawUrl, rawUser, rawPassword);
+    }
+
+    function downloadCredentials(url, username, password) {
+      const product = $("product").textContent;
+      const text = `${product} login details
+
+
+
+` +
+        `Login URL: ${url}
+
+Username:  ${username}
+
+Password:  ${password}
+
+
+
+` +
+        `Please sign in and change this password from the Users page.
+
+`;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+      link.download = `${product.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-login.txt`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
     }
 
     async function pollStatus(signupId) {
       try {
         const s = await api(`/api/signups/${signupId}`);
-        showStatus(s.status, s.email, s.app_url);
-        if (s.status === "active" || s.status === "failed") {
-          localStorage.removeItem("signup_id");
+        showStatus(s.status, s.email, s.app_url, s.username, s.password);
+        if (s.status === "active") {
+          // Polling stops here, so this runs once per page load
+          if (s.password) downloadCredentials(s.app_url, s.username, s.password);
+          try { localStorage.removeItem("signup_id"); } catch (_) {}
           return;
         }
+        // A failed signup is retried by the operator; keep checking so the login still shows up
+        if (s.status === "failed") return setTimeout(() => pollStatus(signupId), 30000);
       } catch (_) { /* transient; keep polling */ }
       setTimeout(() => pollStatus(signupId), 4000);
     }
@@ -148,7 +194,7 @@
         return showError("Please fill in company, name and email.");
       }
       if (payload.email.trim().toLowerCase() !== payload.email_confirm.trim().toLowerCase()) {
-        return showError("The two email addresses don't match. Your login details are sent there, so please check it.");
+        return showError("The two email addresses don't match, please check them.");
       }
       delete payload.email_confirm;
       $("pay-btn").disabled = true;

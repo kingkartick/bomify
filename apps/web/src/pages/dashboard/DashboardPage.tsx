@@ -28,14 +28,14 @@ const shortcuts: ShortcutCard[] = [
         title: "Buyers",
         description: "Manage your buyers",
         icon: <ShoppingCartOutlined style={{ fontSize: 24 }} />,
-        path: "/app/selling/customers",
+        path: "/app/companies",
         color: "#3B82F6",
     },
     {
         title: "Suppliers",
         description: "Manage your vendors",
         icon: <ShopOutlined style={{ fontSize: 24 }} />,
-        path: "/app/buying/parties",
+        path: "/app/companies",
         color: "#22C55E",
     },
     {

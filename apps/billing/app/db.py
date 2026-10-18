@@ -19,7 +19,7 @@ class SignupStatus(str, enum.Enum):
     PENDING = "pending"  # order created, awaiting payment
     PAID = "paid"  # payment verified, waiting to provision
     PROVISIONING = "provisioning"
-    ACTIVE = "active"  # stack running and credentials emailed
+    ACTIVE = "active"  # stack running; credentials shown on the signup page
     FAILED = "failed"
 
 
@@ -51,7 +51,7 @@ class Signup(Base):
     port: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
     app_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     admin_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # Held only until the credentials email goes out, then cleared
+    # Initial admin password, shown on the payer's signup page (looked up by public_id)
     pending_password: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -1,5 +1,6 @@
 """
-Turns a paid signup into a running client stack and emails the credentials.
+Turns a paid signup into a running client stack; the signup page then shows
+(and downloads) the credentials.
 
 Each client gets its own isolated docker compose project created by
 deploy/add-client.sh. Steps are idempotent so a failed signup can be retried:
@@ -20,7 +21,6 @@ from pathlib import Path
 import httpx
 from sqlalchemy import select, update
 
-from app import mailer
 from app.config import settings
 from app.db import SessionLocal, Signup, SignupStatus
 
@@ -178,19 +178,10 @@ def provision(signup_id: int) -> None:
 
             create_stack(signup, signup.pending_password)
             wait_until_healthy(signup.port)
-            mailer.send_credentials(
-                to=signup.email,
-                contact_name=signup.contact_name,
-                company_name=signup.company_name,
-                url=signup.app_url,
-                username=signup.admin_username,
-                password=signup.pending_password,
-            )
 
             with SessionLocal.begin() as db:
                 s = db.get(Signup, signup_id)
                 s.status = SignupStatus.ACTIVE
-                s.pending_password = None
                 s.activated_at = datetime.now(timezone.utc)
             log.info("Provisioned signup %s as %s on port %s", signup_id, signup.slug, signup.port)
         except Exception as exc:  # noqa: BLE001 — record any failure for retry
@@ -199,15 +190,6 @@ def provision(signup_id: int) -> None:
                 s = db.get(Signup, signup_id)
                 s.status = SignupStatus.FAILED
                 s.error = str(exc)[-4000:]
-            try:
-                mailer.send_ops_alert(
-                    f"Provisioning failed for signup {signup_id}",
-                    f"Company: {s.company_name}\nEmail: {s.email}\n"
-                    f"Order: {s.razorpay_order_id}\n\n{s.error}\n\n"
-                    f"Fix the cause, then POST /api/admin/signups/{signup_id}/retry",
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("Could not send ops alert")
 
 
 def resume_pending() -> None:
